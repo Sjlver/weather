@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Ensemble weather forecast (WeatherNext 2 via Open-Meteo): temperature and precipitation with uncertainty bands.">
+<meta name="theme-color" content="#f7f6f2">
+<title>WeatherNext ensemble</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🌦</text></svg>'>
+<link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  /* Inter (variable, weights 100-900), self-hosted. SIL OFL 1.1 — see fonts/OFL.txt */
+  @font-face {
+    font-family: "Inter";
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: url("fonts/inter-latin.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: "Inter";
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: url("fonts/inter-latin-ext.woff2") format("woff2");
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  :root {
+    --bg: #f7f6f2;
+    --panel: #ffffff;
+    --ink: #22303a;
+    --muted: #7a8791;
+    --grid: #e4e6e3;
+    --temp: #c2542e;
+    --temp-band: rgba(194, 84, 46, 0.16);
+    --rain: #2d6b8a;
+    --rain-band: rgba(45, 107, 138, 0.55);
+    --prob: #7a5c9e;
+    --now: #22303a;
+    --accent: #2d6b8a;
+    font-size: 15px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Inter", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem 1rem;
+    padding: 1rem 1.25rem 0.25rem;
+  }
+  header h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    margin: 0;
+  }
+  header .sub {
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.5rem 1.25rem 0.75rem;
+    position: relative;
+  }
+  .search-wrap { position: relative; flex: 1 1 16rem; max-width: 24rem; }
+  input[type="text"] {
+    width: 100%;
+    padding: 0.5rem 0.7rem;
+    font: inherit;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--grid);
+    border-radius: 6px;
+  }
+  input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    padding: 0.5rem 0.9rem;
+    font: inherit;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--grid);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); }
+  .suggestions {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0; right: 0;
+    background: var(--panel);
+    border: 1px solid var(--grid);
+    border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+    z-index: 10;
+    max-height: 16rem;
+    overflow-y: auto;
+  }
+  .suggestions:empty { display: none; }
+  .suggestions div {
+    padding: 0.45rem 0.7rem;
+    cursor: pointer;
+  }
+  .suggestions div:hover, .suggestions div.active { background: #eef3f5; }
+  .suggestions .meta { color: var(--muted); font-size: 0.8rem; }
+  #status {
+    padding: 0 1.25rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+    min-height: 1.2rem;
+  }
+  #status.error { color: #a33; }
+  .charts { padding: 0.5rem 0.75rem 1.5rem; }
+  .chart-panel {
+    background: var(--panel);
+    border: 1px solid var(--grid);
+    border-radius: 8px;
+    margin: 0.5rem 0.5rem 1rem;
+    padding: 0.75rem 0.5rem 0.25rem;
+  }
+  .chart-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 0 0.75rem 0.25rem;
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    align-items: baseline;
+  }
+  .chart-title .legend { font-weight: 400; color: var(--muted); font-size: 0.78rem; }
+  .legend .swatch {
+    display: inline-block;
+    width: 0.8em; height: 0.8em;
+    border-radius: 2px;
+    vertical-align: -0.08em;
+    margin-right: 0.3em;
+  }
+  canvas { display: block; width: 100%; height: 260px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin: 0.25rem 0;
+  }
+  th, td {
+    text-align: right;
+    padding: 0.35rem 0.75rem;
+    border-bottom: 1px solid var(--grid);
+    font-variant-numeric: tabular-nums;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  td .partial { color: var(--muted); font-size: 0.75rem; }
+  td .probcell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45em;
+  }
+  td .probtrack {
+    width: 3em;
+    height: 0.55em;
+    background: rgba(122, 92, 158, 0.15);
+    border-radius: 2px;
+  }
+  td .probbar {
+    display: block;
+    height: 100%;
+    background: var(--prob);
+    border-radius: 2px;
+  }
+  td .probnum {
+    min-width: 3.1em;
+    text-align: right;
+  }
+  .table-note { color: var(--muted); font-size: 0.75rem; padding: 0 0.75rem; }
+  footer {
+    padding: 0 1.25rem 1.5rem;
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>WeatherNext 2 ensemble</h1>
+  <span class="sub" id="model-info">64 members · 6-hourly · via Open-Meteo</span>
+</header>
+
+<div class="controls">
+  <div class="search-wrap">
+    <input type="text" id="search" placeholder="Search location…" autocomplete="off"
+           aria-label="Search location">
+    <div class="suggestions" id="suggestions" role="listbox"></div>
+  </div>
+  <button id="geoloc">Use my location</button>
+</div>
+<div id="status"></div>
+
+<div class="charts">
+  <div class="chart-panel">
+    <div class="chart-title">
+      <span id="temp-title">Temperature (2 m)</span>
+      <span class="legend"><span class="swatch" style="background:var(--temp)"></span>median</span>
+      <span class="legend"><span class="swatch" style="background:var(--temp-band)"></span><span class="ci-label">80 %</span></span>
+    </div>
+    <canvas id="temp-chart" height="260"></canvas>
+  </div>
+  <div class="chart-panel">
+    <div class="chart-title">
+      <span>Precipitation (6 h totals)</span>
+      <span class="legend"><span class="swatch" style="background:var(--rain-band)"></span>median (bar) · whisker to <span class="ci-label">80 %</span></span>
+      <span class="legend"><span class="swatch" style="background:var(--prob)"></span>P(&gt; 0.1 mm)</span>
+    </div>
+    <canvas id="precip-chart" height="260"></canvas>
+  </div>
+  <div class="chart-panel" id="daily-panel" hidden>
+    <div class="chart-title"><span>Daily precipitation totals</span>
+      <span class="legend">member-wise daily sums, then percentiles across the ensemble</span>
+    </div>
+    <table id="daily-table">
+      <thead>
+        <tr><th>Day</th><th>Median</th><th class="ci-label">80 %</th><th>P(&gt; 0.1 mm)</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p class="table-note">Each 6-h interval is assigned to the local day of its midpoint;
+      days with fewer than four intervals are marked “partial”.</p>
+  </div>
+</div>
+
+<footer>
+  Weather data by <a href="https://open-meteo.com/">Open-Meteo</a> (CC BY 4.0), model:
+  Google DeepMind WeatherNext 2 ensemble. Precipitation bars span the 6-hour interval
+  <em>ending</em> at the labelled tick. Times shown in the location's local time.
+</footer>
+
+<script>
+"use strict";
+
+/* ---------------- state ---------------- */
+const state = {
+  place: null,        // {name, latitude, longitude}
+  data: null,         // processed forecast
+  hover: null,        // hovered time index or null
+};
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status");
+
+function setStatus(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.classList.toggle("error", isError);
+}
+
+/* ---------------- percentiles ---------------- */
+// Central interval shown everywhere. 0.10/0.90 = 80 % CI; use 0.25/0.75 for IQR.
+const CI_LO = 0.10, CI_HI = 0.90;
+const CI_LABEL = `${Math.round(CI_LO * 100)}–${Math.round(CI_HI * 100)} %`;
+
+// Linear interpolation between order statistics (numpy default).
+function quantile(sortedArr, q) {
+  const n = sortedArr.length;
+  if (n === 0) return NaN;
+  const pos = q * (n - 1);
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  if (lo === hi) return sortedArr[lo];
+  return sortedArr[lo] + (sortedArr[hi] - sortedArr[lo]) * (pos - lo);
+}
+
+/* ---------------- fetch + process ---------------- */
+async function loadForecast(place) {
+  state.place = place;
+  setStatus(`Loading forecast for ${place.name}…`);
+  const params = new URLSearchParams({
+    latitude: place.latitude,
+    longitude: place.longitude,
+    hourly: "temperature_2m,precipitation",
+    models: "google_weathernext2_ensemble",
+    temporal_resolution: "native",
+    timeformat: "unixtime",
+    timezone: "auto",
+    forecast_days: "10",
+  });
+  let json;
+  try {
+    const res = await fetch("https://ensemble-api.open-meteo.com/v1/ensemble?" + params);
+    json = await res.json();
+    if (!res.ok || json.error) throw new Error(json.reason || res.statusText);
+  } catch (e) {
+    setStatus("Could not load forecast: " + e.message, true);
+    return;
+  }
+
+  const h = json.hourly;
+  const times = h.time; // unix seconds, UTC epoch
+  const offset = json.utc_offset_seconds;
+
+  // Collect ensemble members: "temperature_2m", "temperature_2m_member01", …
+  const memberKeys = (base) =>
+    Object.keys(h).filter((k) => k === base || k.startsWith(base + "_member"));
+
+  const tKeys = memberKeys("temperature_2m");
+  const pKeys = memberKeys("precipitation");
+
+  const n = times.length;
+  const temp = { lo: [], p50: [], hi: [] };
+  const prec = { lo: [], p50: [], hi: [], prob: [] };
+
+  for (let i = 0; i < n; i++) {
+    const tv = tKeys.map((k) => h[k][i]).filter((v) => v != null).sort((a, b) => a - b);
+    temp.lo.push(quantile(tv, CI_LO));
+    temp.p50.push(quantile(tv, 0.50));
+    temp.hi.push(quantile(tv, CI_HI));
+
+    const pv = pKeys.map((k) => h[k][i]).filter((v) => v != null).sort((a, b) => a - b);
+    prec.lo.push(quantile(pv, CI_LO));
+    prec.p50.push(quantile(pv, 0.50));
+    prec.hi.push(quantile(pv, CI_HI));
+    prec.prob.push(pv.length ? pv.filter((v) => v > 0.1).length / pv.length : NaN);
+  }
+
+  // ---- daily totals: sum per member first, then percentiles across members ----
+  // Each 6-h interval (t-6h, t] is assigned to the local day of its midpoint.
+  const dayKey = (t) => Math.floor((t - 3 * 3600 + offset) / 86400);
+  const dayMap = new Map(); // key -> { sums: Float64Array(members), count, key }
+  for (let i = 0; i < n; i++) {
+    if (h[pKeys[0]][i] == null) continue;
+    const key = dayKey(times[i]);
+    if (!dayMap.has(key)) {
+      dayMap.set(key, { sums: new Float64Array(pKeys.length), count: 0, key });
+    }
+    const d = dayMap.get(key);
+    d.count++;
+    pKeys.forEach((k, m) => { d.sums[m] += h[k][i] ?? 0; });
+  }
+  const daily = [...dayMap.values()].sort((a, b) => a.key - b.key).map((d) => {
+    const s = [...d.sums].sort((a, b) => a - b);
+    const p = localParts(d.key * 86400 + 43200 - offset, offset); // local noon of that day
+    return {
+      label: `${DAYS[p.day]} ${p.date} ${MONTHS[p.month]}`,
+      lo: quantile(s, CI_LO),
+      p50: quantile(s, 0.50),
+      hi: quantile(s, CI_HI),
+      prob: s.filter((v) => v > 0.1).length / s.length,
+      partial: d.count < 4,
+    };
+  });
+
+  state.data = {
+    times, offset, temp, prec, daily,
+    nMembers: tKeys.length,
+    tempUnit: json.hourly_units.temperature_2m || "°C",
+    precUnit: json.hourly_units.precipitation || "mm",
+  };
+  $("model-info").textContent =
+    `${tKeys.length} members · 6-hourly · ${place.name}`;
+  // Remember the place once a forecast actually loaded for it.
+  try { localStorage.setItem("wn_place", JSON.stringify(place)); } catch (e) {}
+  setStatus("");
+  drawAll();
+  renderDailyTable();
+}
+
+/* ---------------- time helpers ---------------- */
+// All drawing is done in the *location's* local time by shifting the epoch.
+function localParts(unixSec, offset) {
+  const d = new Date((unixSec + offset) * 1000);
+  return {
+    h: d.getUTCHours(),
+    day: d.getUTCDay(),
+    date: d.getUTCDate(),
+    month: d.getUTCMonth(),
+  };
+}
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+/* ---------------- drawing ---------------- */
+const PAD = { l: 44, r: 44, t: 10, b: 38 };
+
+function setupCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w: rect.width, hgt: rect.height };
+}
+
+function niceStep(range, targetTicks) {
+  const raw = range / targetTicks;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 2, 2.5, 5, 10]) {
+    if (m * mag >= raw) return m * mag;
+  }
+  return 10 * mag;
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// Shared x-axis: unix time -> pixel
+function makeXScale(times, w) {
+  // Extend left by one interval so the first precipitation bar has room.
+  const t0 = times[0] - 6 * 3600;
+  const t1 = times[times.length - 1];
+  return {
+    t0, t1,
+    x: (t) => PAD.l + ((t - t0) / (t1 - t0)) * (w - PAD.l - PAD.r),
+    invert: (px) => t0 + ((px - PAD.l) / (w - PAD.l - PAD.r)) * (t1 - t0),
+  };
+}
+
+function drawTimeAxis(ctx, xs, w, hgt, offset) {
+  ctx.font = "11px Inter, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  const gridCol = cssVar("--grid"), muted = cssVar("--muted"), ink = cssVar("--ink");
+  const H6 = 6 * 3600, DAY = 24 * 3600;
+
+  // Ticks sit at the data timestamps (6-h multiples in UTC = interval right edges).
+  // Label them with the *local* hour, whatever it is (e.g. 02/08/14/20 for UTC+2).
+  const pxPer6h = xs.x(xs.t0 + H6) - xs.x(xs.t0);
+  const labelEvery = pxPer6h >= 26 ? 1 : pxPer6h * 2 >= 26 ? 2 : 4;
+
+  const startTick = Math.ceil(xs.t0 / H6) * H6;
+  let k = 0;
+  for (let t = startTick; t <= xs.t1; t += H6, k++) {
+    const px = xs.x(t);
+    ctx.strokeStyle = gridCol;
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(px, PAD.t);
+    ctx.lineTo(px, hgt - PAD.b);
+    ctx.stroke();
+    if (k % labelEvery === 0) {
+      ctx.fillStyle = muted;
+      ctx.fillText(String(localParts(t, offset).h).padStart(2, "0"), px, hgt - PAD.b + 14);
+    }
+  }
+
+  // Local midnights: heavier line (independent of the data ticks).
+  const firstMidnight = Math.ceil((xs.t0 + offset) / DAY) * DAY - offset;
+  for (let t = firstMidnight; t <= xs.t1; t += DAY) {
+    const px = xs.x(t);
+    ctx.strokeStyle = gridCol;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(px, PAD.t);
+    ctx.lineTo(px, hgt - PAD.b);
+    ctx.stroke();
+  }
+
+  // Day labels centred on local noon (clamped into the visible day span).
+  for (let t = firstMidnight - DAY; t <= xs.t1; t += DAY) {
+    const noon = Math.min(Math.max(t + DAY / 2, xs.t0 + 2 * 3600), xs.t1 - 2 * 3600);
+    if (noon < xs.t0 || noon > xs.t1) continue;
+    const p = localParts(noon, offset);
+    ctx.fillStyle = ink;
+    ctx.fillText(`${DAYS[p.day]} ${p.date} ${MONTHS[p.month]}`, xs.x(noon), hgt - PAD.b + 28);
+  }
+}
+
+function drawNowLine(ctx, xs, hgt, offset) {
+  const now = Date.now() / 1000;
+  if (now < xs.t0 || now > xs.t1) return;
+  const px = xs.x(now);
+  ctx.save();
+  ctx.strokeStyle = cssVar("--now");
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(px, PAD.t);
+  ctx.lineTo(px, hgt - PAD.b);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = cssVar("--now");
+  ctx.font = "10px Inter, system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("now", px + 4, PAD.t + 10);
+  ctx.restore();
+}
+
+function drawTempChart() {
+  const { times, offset, temp, tempUnit } = state.data;
+  const canvas = $("temp-chart");
+  const { ctx, w, hgt } = setupCanvas(canvas);
+  const xs = makeXScale(times, w);
+
+  // y-range over finite values
+  const finite = (a) => a.filter(Number.isFinite);
+  const lo = Math.min(...finite(temp.lo)), hi = Math.max(...finite(temp.hi));
+  const padY = (hi - lo) * 0.08 || 1;
+  const y0 = lo - padY, y1 = hi + padY;
+  const y = (v) => hgt - PAD.b - ((v - y0) / (y1 - y0)) * (hgt - PAD.t - PAD.b);
+
+  drawTimeAxis(ctx, xs, w, hgt, offset);
+
+  // y grid + labels
+  ctx.font = "11px Inter, system-ui, sans-serif";
+  const step = niceStep(y1 - y0, 5);
+  for (let v = Math.ceil(y0 / step) * step; v <= y1; v += step) {
+    ctx.strokeStyle = cssVar("--grid");
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(PAD.l, y(v));
+    ctx.lineTo(w - PAD.r, y(v));
+    ctx.stroke();
+    ctx.fillStyle = cssVar("--muted");
+    ctx.textAlign = "right";
+    ctx.fillText(Math.round(v * 10) / 10 + tempUnit.replace("°C", "°"), PAD.l - 6, y(v) + 4);
+  }
+
+  // CI band (temperature is instantaneous at the tick — points sit at the timestamps)
+  const seg = [];
+  const flush = () => {
+    if (seg.length < 2) { seg.length = 0; return; }
+    ctx.beginPath();
+    seg.forEach(([px, hiY], i) => i ? ctx.lineTo(px, hiY) : ctx.moveTo(px, hiY));
+    for (let i = seg.length - 1; i >= 0; i--) ctx.lineTo(seg[i][0], seg[i][2]);
+    ctx.closePath();
+    ctx.fillStyle = cssVar("--temp-band");
+    ctx.fill();
+    // median
+    ctx.beginPath();
+    seg.forEach(([px, , , p50], i) => i ? ctx.lineTo(px, p50) : ctx.moveTo(px, p50));
+    ctx.strokeStyle = cssVar("--temp");
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    seg.length = 0;
+  };
+  for (let i = 0; i < times.length; i++) {
+    if (Number.isFinite(temp.p50[i])) {
+      seg.push([xs.x(times[i]), y(temp.hi[i]), y(temp.lo[i]), y(temp.p50[i])]);
+    } else flush();
+  }
+  flush();
+
+  drawNowLine(ctx, xs, hgt, offset);
+  drawHover(ctx, xs, w, hgt, "temp", y);
+}
+
+function drawPrecipChart() {
+  const { times, offset, prec, precUnit } = state.data;
+  const canvas = $("precip-chart");
+  const { ctx, w, hgt } = setupCanvas(canvas);
+  const xs = makeXScale(times, w);
+
+  const finite = prec.hi.filter(Number.isFinite);
+  const maxP = Math.max(1, ...finite);
+  const y0 = 0, y1 = maxP * 1.1;
+  const y = (v) => hgt - PAD.b - ((v - y0) / (y1 - y0)) * (hgt - PAD.t - PAD.b);
+  // right axis: probability 0..1
+  const yp = (v) => hgt - PAD.b - v * (hgt - PAD.t - PAD.b);
+
+  drawTimeAxis(ctx, xs, w, hgt, offset);
+
+  // left axis (mm)
+  ctx.font = "11px Inter, system-ui, sans-serif";
+  const step = niceStep(y1 - y0, 5);
+  for (let v = 0; v <= y1; v += step) {
+    ctx.strokeStyle = cssVar("--grid");
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(PAD.l, y(v));
+    ctx.lineTo(w - PAD.r, y(v));
+    ctx.stroke();
+    ctx.fillStyle = cssVar("--muted");
+    ctx.textAlign = "right";
+    ctx.fillText(Math.round(v * 10) / 10 + " " + precUnit, PAD.l - 6, y(v) + 4);
+  }
+  // right axis (%)
+  ctx.textAlign = "left";
+  for (let v = 0; v <= 1.001; v += 0.25) {
+    ctx.fillStyle = cssVar("--prob");
+    ctx.fillText(Math.round(v * 100) + " %", w - PAD.r + 6, yp(v) + 4);
+  }
+
+  // Bars: interval (t-6h, t], right edge at the labelled tick.
+  const gap = 1.5;
+  for (let i = 0; i < times.length; i++) {
+    if (!Number.isFinite(prec.p50[i])) continue;
+    const xR = xs.x(times[i]);
+    const xL = xs.x(times[i] - 6 * 3600);
+    const bx = xL + gap, bw = xR - xL - 2 * gap;
+    // median bar
+    ctx.fillStyle = cssVar("--rain-band");
+    ctx.fillRect(bx, y(prec.p50[i]), bw, y(0) - y(prec.p50[i]));
+    // whisker: central CI
+    const cx = (xL + xR) / 2;
+    ctx.strokeStyle = cssVar("--rain");
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(cx, y(prec.lo[i]));
+    ctx.lineTo(cx, y(prec.hi[i]));
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - 3.5, y(prec.hi[i]));
+    ctx.lineTo(cx + 3.5, y(prec.hi[i]));
+    ctx.stroke();
+  }
+
+  // probability step line: constant over each interval (t-6h, t]
+  ctx.strokeStyle = cssVar("--prob");
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  let started = false;
+  for (let i = 0; i < times.length; i++) {
+    if (!Number.isFinite(prec.prob[i])) { started = false; continue; }
+    const xL = xs.x(times[i] - 6 * 3600), xR = xs.x(times[i]);
+    const py = yp(prec.prob[i]);
+    if (!started) { ctx.moveTo(xL, py); started = true; } else ctx.lineTo(xL, py);
+    ctx.lineTo(xR, py);
+  }
+  ctx.stroke();
+
+  drawNowLine(ctx, xs, hgt, offset);
+  drawHover(ctx, xs, w, hgt, "prec", y, yp);
+}
+
+/* ---------------- hover readout ---------------- */
+function drawHover(ctx, xs, w, hgt, which, y, yp) {
+  if (state.hover == null || !state.data) return;
+  const { times, offset, temp, prec, tempUnit, precUnit } = state.data;
+  const i = state.hover;
+  if (i < 0 || i >= times.length) return;
+  const t = times[i];
+  const p = localParts(t, offset);
+
+  const lines = [];
+  const hh = (x) => String(x).padStart(2, "0");
+  if (which === "temp") {
+    if (!Number.isFinite(temp.p50[i])) return;
+    lines.push(`${DAYS[p.day]} ${hh(p.h)}:00`);
+    lines.push(`median ${temp.p50[i].toFixed(1)} ${tempUnit}`);
+    lines.push(`${CI_LABEL}: ${temp.lo[i].toFixed(1)} … ${temp.hi[i].toFixed(1)}`);
+  } else {
+    if (!Number.isFinite(prec.p50[i])) return;
+    const pFrom = localParts(t - 6 * 3600, offset);
+    lines.push(`${DAYS[p.day]} ${hh(pFrom.h)}–${hh(p.h)}:00`);
+    lines.push(`median ${prec.p50[i].toFixed(1)} ${precUnit}, P${Math.round(CI_HI*100)}: ${prec.hi[i].toFixed(1)}`);
+    lines.push(`P(rain) ${(prec.prob[i] * 100).toFixed(0)} %`);
+  }
+
+  const px = which === "temp" ? xs.x(t) : (xs.x(t) + xs.x(t - 6 * 3600)) / 2;
+  ctx.save();
+  ctx.strokeStyle = "rgba(34,48,58,0.4)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px, PAD.t);
+  ctx.lineTo(px, hgt - PAD.b);
+  ctx.stroke();
+
+  ctx.font = "11px Inter, system-ui, sans-serif";
+  const wBox = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 14;
+  const hBox = lines.length * 15 + 8;
+  let bx = px + 8;
+  if (bx + wBox > w - PAD.r) bx = px - 8 - wBox;
+  const by = PAD.t + 4;
+  ctx.fillStyle = "rgba(255,255,255,0.94)";
+  ctx.strokeStyle = cssVar("--grid");
+  ctx.beginPath();
+  ctx.roundRect(bx, by, wBox, hBox, 5);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = cssVar("--ink");
+  ctx.textAlign = "left";
+  lines.forEach((l, k) => ctx.fillText(l, bx + 7, by + 16 + k * 15));
+  ctx.restore();
+}
+
+function attachHover(canvas) {
+  const move = (ev) => {
+    if (!state.data) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = (ev.touches ? ev.touches[0].clientX : ev.clientX) - rect.left;
+    const xs = makeXScale(state.data.times, rect.width);
+    const t = xs.invert(px);
+    // nearest timestamp (temperature) / containing interval (precip): use nearest index
+    const times = state.data.times;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < times.length; i++) {
+      const d = Math.abs(times[i] - 3 * 3600 - t); // centre of interval as anchor
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    state.hover = best;
+    drawAll();
+  };
+  canvas.addEventListener("mousemove", move);
+  canvas.addEventListener("touchmove", move, { passive: true });
+  canvas.addEventListener("mouseleave", () => { state.hover = null; drawAll(); });
+}
+
+function drawAll() {
+  if (!state.data) return;
+  drawTempChart();
+  drawPrecipChart();
+}
+
+function renderDailyTable() {
+  const { daily, precUnit } = state.data;
+  const panel = $("daily-panel");
+  const tbody = $("daily-table").querySelector("tbody");
+  tbody.innerHTML = "";
+  daily.forEach((d) => {
+    const tr = document.createElement("tr");
+    const fmt = (v) => v.toFixed(1);
+    tr.innerHTML =
+      `<td>${d.label}${d.partial ? ' <span class="partial">(partial)</span>' : ""}</td>` +
+      `<td>${fmt(d.p50)} ${precUnit}</td>` +
+      `<td>${fmt(d.lo)} – ${fmt(d.hi)} ${precUnit}</td>` +
+      `<td><span class="probcell">` +
+      `<span class="probtrack"><span class="probbar" style="width:${(d.prob * 100).toFixed(0)}%"></span></span>` +
+      `<span class="probnum">${Math.round(d.prob * 100)} %</span></span></td>`;
+    tbody.appendChild(tr);
+  });
+  panel.hidden = daily.length === 0;
+}
+
+/* ---------------- geocoding ---------------- */
+const searchEl = $("search");
+const sugEl = $("suggestions");
+let debounce = null;
+let activeIdx = -1;
+
+searchEl.addEventListener("input", () => {
+  clearTimeout(debounce);
+  activeIdx = -1;
+  const q = searchEl.value.trim();
+  if (q.length < 2) { sugEl.innerHTML = ""; return; }
+  debounce = setTimeout(async () => {
+    try {
+      const res = await fetch(
+        "https://geocoding-api.open-meteo.com/v1/search?" +
+        new URLSearchParams({ name: q, count: 6, language: "en", format: "json" })
+      );
+      const json = await res.json();
+      sugEl.innerHTML = "";
+      (json.results || []).forEach((r) => {
+        const div = document.createElement("div");
+        const meta = [r.admin1, r.country].filter(Boolean).join(", ");
+        div.innerHTML = `${r.name} <span class="meta">${meta}</span>`;
+        div.addEventListener("click", () => {
+          sugEl.innerHTML = "";
+          searchEl.value = r.name;
+          loadForecast({ name: `${r.name}${meta ? ", " + meta : ""}`,
+                         latitude: r.latitude, longitude: r.longitude });
+        });
+        sugEl.appendChild(div);
+      });
+      if (!(json.results || []).length) setStatus("No places found.", false);
+    } catch (e) {
+      setStatus("Geocoding failed: " + e.message, true);
+    }
+  }, 300);
+});
+searchEl.addEventListener("keydown", (ev) => {
+  const items = [...sugEl.children];
+  if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+    if (!items.length) return;
+    ev.preventDefault();
+    activeIdx = ev.key === "ArrowDown"
+      ? (activeIdx + 1) % items.length
+      : (activeIdx - 1 + items.length) % items.length;
+    items.forEach((el, i) => el.classList.toggle("active", i === activeIdx));
+    items[activeIdx].scrollIntoView({ block: "nearest" });
+  } else if (ev.key === "Enter") {
+    const target = items[activeIdx] || items[0];
+    if (target) target.click();
+  } else if (ev.key === "Escape") {
+    sugEl.innerHTML = "";
+  }
+});
+document.addEventListener("click", (ev) => {
+  if (!ev.target.closest(".search-wrap")) sugEl.innerHTML = "";
+});
+
+$("geoloc").addEventListener("click", () => {
+  if (!navigator.geolocation) { setStatus("Geolocation not available.", true); return; }
+  setStatus("Locating…");
+  navigator.geolocation.getCurrentPosition(
+    (pos) => loadForecast({
+      name: `${pos.coords.latitude.toFixed(3)}, ${pos.coords.longitude.toFixed(3)}`,
+      latitude: pos.coords.latitude,
+      longitude: pos.coords.longitude,
+    }),
+    (err) => setStatus("Geolocation failed: " + err.message, true),
+    { timeout: 10000 }
+  );
+});
+
+/* ---------------- init ---------------- */
+document.querySelectorAll(".ci-label").forEach((el) => { el.textContent = CI_LABEL; });
+attachHover($("temp-chart"));
+attachHover($("precip-chart"));
+window.addEventListener("resize", drawAll);
+// redraw once the self-hosted font is ready so canvas text uses it
+if (document.fonts?.ready) document.fonts.ready.then(drawAll);
+// redraw the "now" line every minute
+setInterval(drawAll, 60 * 1000);
+try {
+  const saved = localStorage.getItem("wn_place");
+  if (saved) loadForecast(JSON.parse(saved));
+  else setStatus("Search for a place or use your location to start.");
+} catch (e) {
+  setStatus("Search for a place or use your location to start.");
+}
+</script>
+</body>
+</html>
