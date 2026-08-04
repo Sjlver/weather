@@ -7,6 +7,8 @@
 <meta name="theme-color" content="#f7f6f2">
 <title>WeatherNext ensemble</title>
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🌦</text></svg>'>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
 <style>
   /* Inter (variable, weights 100-900), self-hosted. SIL OFL 1.1 — see fonts/OFL.txt */
@@ -305,7 +307,7 @@ async function loadForecast(place) {
 
   const h = json.hourly;
   const times = h.time; // unix seconds, UTC epoch
-  const offset = json.utc_offset_seconds;
+  const tz = pickTimeZone(place, json);
 
   // Collect ensemble members: "temperature_2m", "temperature_2m_member01", …
   const memberKeys = (base) =>
@@ -333,7 +335,10 @@ async function loadForecast(place) {
 
   // ---- daily totals: sum per member first, then percentiles across members ----
   // Each 6-h interval (t-6h, t] is assigned to the local day of its midpoint.
-  const dayKey = (t) => Math.floor((t - 3 * 3600 + offset) / 86400);
+  const dayKey = (t) => {
+    const mid = t - 3 * 3600;
+    return Math.floor((mid + tzOffset(mid, tz)) / 86400);
+  };
   const dayMap = new Map(); // key -> { sums: Float64Array(members), count, key }
   for (let i = 0; i < n; i++) {
     if (h[pKeys[0]][i] == null) continue;
@@ -347,7 +352,7 @@ async function loadForecast(place) {
   }
   const daily = [...dayMap.values()].sort((a, b) => a.key - b.key).map((d) => {
     const s = [...d.sums].sort((a, b) => a - b);
-    const p = localParts(d.key * 86400 + 43200 - offset, offset); // local noon of that day
+    const p = localParts(fromLocal(d.key * 86400 + 43200, tz), tz); // local noon of that day
     return {
       label: `${DAYS[p.day]} ${p.date} ${MONTHS[p.month]}`,
       lo: quantile(s, CI_LO),
@@ -359,7 +364,7 @@ async function loadForecast(place) {
   });
 
   state.data = {
-    times, offset, temp, prec, daily,
+    times, tz, temp, prec, daily,
     nMembers: tKeys.length,
     tempUnit: json.hourly_units.temperature_2m || "°C",
     precUnit: json.hourly_units.precipitation || "mm",
@@ -374,15 +379,66 @@ async function loadForecast(place) {
 }
 
 /* ---------------- time helpers ---------------- */
-// All drawing is done in the *location's* local time by shifting the epoch.
-function localParts(unixSec, offset) {
-  const d = new Date((unixSec + offset) * 1000);
+// All drawing is done in the *location's* local time, derived from its IANA
+// time zone via Intl rather than the API's utc_offset_seconds: a single fixed
+// offset is wrong across a DST change inside the forecast window, and an
+// offset of 0 silently falls back to UTC.
+const tzFormatterCache = new Map();
+function tzFormatter(tz) {
+  let f = tzFormatterCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, hourCycle: "h23",
+      year: "numeric", month: "numeric", day: "numeric",
+      hour: "numeric", minute: "numeric", second: "numeric",
+    });
+    tzFormatterCache.set(tz, f);
+  }
+  return f;
+}
+
+// Offset (seconds east of UTC) of `tz` at a given instant, cached per 15 min.
+const tzOffsetCache = new Map();
+function tzOffset(unixSec, tz) {
+  const key = tz + ":" + Math.floor(unixSec / 900);
+  let off = tzOffsetCache.get(key);
+  if (off === undefined) {
+    const p = {};
+    for (const part of tzFormatter(tz).formatToParts(new Date(unixSec * 1000))) {
+      p[part.type] = part.value;
+    }
+    off = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) / 1000 - unixSec;
+    tzOffsetCache.set(key, off);
+  }
+  return off;
+}
+
+// "Local epoch" (seconds since 1970 as read on a local wall clock) -> instant.
+function fromLocal(localSec, tz) {
+  const guess = localSec - tzOffset(localSec, tz);
+  return localSec - tzOffset(guess, tz); // second pass fixes DST edges
+}
+
+function localParts(unixSec, tz) {
+  const d = new Date((unixSec + tzOffset(unixSec, tz)) * 1000);
   return {
     h: d.getUTCHours(),
+    min: d.getUTCMinutes(),
     day: d.getUTCDay(),
     date: d.getUTCDate(),
     month: d.getUTCMonth(),
   };
+}
+
+// Preference order: the place's own zone (geocoding / browser geolocation),
+// then whatever the forecast response reports, then the browser's zone.
+function pickTimeZone(place, json) {
+  for (const tz of [place.timezone, json.timezone]) {
+    if (tz) {
+      try { tzFormatter(tz); return tz; } catch (e) { /* unknown zone name */ }
+    }
+  }
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -425,56 +481,84 @@ function makeXScale(times, w) {
   };
 }
 
-function drawTimeAxis(ctx, xs, w, hgt, offset) {
+function drawTimeAxis(ctx, xs, w, hgt, tz) {
   ctx.font = "11px Inter, system-ui, sans-serif";
   ctx.textAlign = "center";
   const gridCol = cssVar("--grid"), muted = cssVar("--muted"), ink = cssVar("--ink");
   const H6 = 6 * 3600, DAY = 24 * 3600;
+  const pxPer6h = xs.x(xs.t0 + H6) - xs.x(xs.t0);
+  const pxPerDay = pxPer6h * 4;
 
   // Ticks sit at the data timestamps (6-h multiples in UTC = interval right edges).
   // Label them with the *local* hour, whatever it is (e.g. 02/08/14/20 for UTC+2).
-  const pxPer6h = xs.x(xs.t0 + H6) - xs.x(xs.t0);
-  const labelEvery = pxPer6h >= 26 ? 1 : pxPer6h * 2 >= 26 ? 2 : 4;
+  // Label every 1st/2nd/4th tick — whichever first leaves room between labels.
+  // On very narrow screens even one label per day collides with its neighbour
+  // (and would repeat the same hour anyway), so drop the hour row entirely.
+  const hourLabelW = ctx.measureText("00").width + 10;
+  const labelEvery = [1, 2, 4].find((e) => e * pxPer6h >= hourLabelW) ?? 0;
+  // Dense 6-h grid lines are noise on narrow screens; keep only midnight lines.
+  const showHourGrid = pxPer6h >= 10;
 
   const startTick = Math.ceil(xs.t0 / H6) * H6;
-  let k = 0;
-  for (let t = startTick; t <= xs.t1; t += H6, k++) {
+  for (let t = startTick; t <= xs.t1; t += H6) {
     const px = xs.x(t);
-    ctx.strokeStyle = gridCol;
-    ctx.lineWidth = 0.6;
-    ctx.beginPath();
-    ctx.moveTo(px, PAD.t);
-    ctx.lineTo(px, hgt - PAD.b);
-    ctx.stroke();
-    if (k % labelEvery === 0) {
+    if (showHourGrid) {
+      ctx.strokeStyle = gridCol;
+      ctx.lineWidth = 0.6;
+      ctx.beginPath();
+      ctx.moveTo(px, PAD.t);
+      ctx.lineTo(px, hgt - PAD.b);
+      ctx.stroke();
+    }
+    // Anchor on absolute tick numbers so the labelled hours match across days.
+    if (labelEvery && (t / H6) % labelEvery === 0) {
       ctx.fillStyle = muted;
-      ctx.fillText(String(localParts(t, offset).h).padStart(2, "0"), px, hgt - PAD.b + 14);
+      ctx.fillText(String(localParts(t, tz).h).padStart(2, "0"), px, hgt - PAD.b + 14);
     }
   }
 
-  // Local midnights: heavier line (independent of the data ticks).
-  const firstMidnight = Math.ceil((xs.t0 + offset) / DAY) * DAY - offset;
-  for (let t = firstMidnight; t <= xs.t1; t += DAY) {
-    const px = xs.x(t);
-    ctx.strokeStyle = gridCol;
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(px, PAD.t);
-    ctx.lineTo(px, hgt - PAD.b);
-    ctx.stroke();
-  }
+  // Day labels: pick the widest format that fits into one day's width.
+  const dayFmts = [
+    (p) => `${DAYS[p.day]} ${p.date} ${MONTHS[p.month]}`,
+    (p) => `${DAYS[p.day]} ${p.date}`,
+    (p) => DAYS[p.day].slice(0, 2),
+  ];
+  const samples = ["Wed 30 Aug", "Wed 30", "We"];
+  let fmtDay = dayFmts[samples.findIndex((s) => ctx.measureText(s).width + 4 <= pxPerDay)];
+  let dayEvery = 1;
+  if (!fmtDay) { fmtDay = dayFmts[2]; dayEvery = 2; } // last resort: every other day
 
-  // Day labels centred on local noon (clamped into the visible day span).
-  for (let t = firstMidnight - DAY; t <= xs.t1; t += DAY) {
-    const noon = Math.min(Math.max(t + DAY / 2, xs.t0 + 2 * 3600), xs.t1 - 2 * 3600);
+  // Iterate local calendar days; midnight instants come from the time zone,
+  // so odd offsets (e.g. UTC+5:30) and DST switches land in the right place.
+  const firstDay = Math.floor((xs.t0 + tzOffset(xs.t0, tz)) / DAY);
+  const lastDay = Math.floor((xs.t1 + tzOffset(xs.t1, tz)) / DAY);
+  for (let dk = firstDay; dk <= lastDay; dk++) {
+    const midnight = fromLocal(dk * DAY, tz);
+    if (midnight >= xs.t0 && midnight <= xs.t1) {
+      const px = xs.x(midnight);
+      ctx.strokeStyle = gridCol;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(px, PAD.t);
+      ctx.lineTo(px, hgt - PAD.b);
+      ctx.stroke();
+    }
+    if (dk % dayEvery !== 0) continue;
+    // Label centred on local noon (clamped into the visible day span); skip
+    // days whose visible sliver is too narrow for their label.
+    const noon = Math.min(Math.max(fromLocal(dk * DAY + DAY / 2, tz), xs.t0 + 2 * 3600), xs.t1 - 2 * 3600);
     if (noon < xs.t0 || noon > xs.t1) continue;
-    const p = localParts(noon, offset);
+    const p = localParts(noon, tz);
+    const label = fmtDay(p);
+    const visiblePx = xs.x(Math.min(fromLocal((dk + 1) * DAY, tz), xs.t1)) -
+                      xs.x(Math.max(midnight, xs.t0));
+    if (visiblePx < ctx.measureText(label).width + 4) continue;
     ctx.fillStyle = ink;
-    ctx.fillText(`${DAYS[p.day]} ${p.date} ${MONTHS[p.month]}`, xs.x(noon), hgt - PAD.b + 28);
+    ctx.fillText(label, xs.x(noon), hgt - PAD.b + 28);
   }
 }
 
-function drawNowLine(ctx, xs, hgt, offset) {
+function drawNowLine(ctx, xs, hgt) {
   const now = Date.now() / 1000;
   if (now < xs.t0 || now > xs.t1) return;
   const px = xs.x(now);
@@ -495,7 +579,7 @@ function drawNowLine(ctx, xs, hgt, offset) {
 }
 
 function drawTempChart() {
-  const { times, offset, temp, tempUnit } = state.data;
+  const { times, tz, temp, tempUnit } = state.data;
   const canvas = $("temp-chart");
   const { ctx, w, hgt } = setupCanvas(canvas);
   const xs = makeXScale(times, w);
@@ -507,7 +591,7 @@ function drawTempChart() {
   const y0 = lo - padY, y1 = hi + padY;
   const y = (v) => hgt - PAD.b - ((v - y0) / (y1 - y0)) * (hgt - PAD.t - PAD.b);
 
-  drawTimeAxis(ctx, xs, w, hgt, offset);
+  drawTimeAxis(ctx, xs, w, hgt, tz);
 
   // y grid + labels
   ctx.font = "11px Inter, system-ui, sans-serif";
@@ -549,12 +633,12 @@ function drawTempChart() {
   }
   flush();
 
-  drawNowLine(ctx, xs, hgt, offset);
+  drawNowLine(ctx, xs, hgt);
   drawHover(ctx, xs, w, hgt, "temp", y);
 }
 
 function drawPrecipChart() {
-  const { times, offset, prec, precUnit } = state.data;
+  const { times, tz, prec, precUnit } = state.data;
   const canvas = $("precip-chart");
   const { ctx, w, hgt } = setupCanvas(canvas);
   const xs = makeXScale(times, w);
@@ -566,7 +650,7 @@ function drawPrecipChart() {
   // right axis: probability 0..1
   const yp = (v) => hgt - PAD.b - v * (hgt - PAD.t - PAD.b);
 
-  drawTimeAxis(ctx, xs, w, hgt, offset);
+  drawTimeAxis(ctx, xs, w, hgt, tz);
 
   // left axis (mm)
   ctx.font = "11px Inter, system-ui, sans-serif";
@@ -627,30 +711,31 @@ function drawPrecipChart() {
   }
   ctx.stroke();
 
-  drawNowLine(ctx, xs, hgt, offset);
+  drawNowLine(ctx, xs, hgt);
   drawHover(ctx, xs, w, hgt, "prec", y, yp);
 }
 
 /* ---------------- hover readout ---------------- */
 function drawHover(ctx, xs, w, hgt, which, y, yp) {
   if (state.hover == null || !state.data) return;
-  const { times, offset, temp, prec, tempUnit, precUnit } = state.data;
+  const { times, tz, temp, prec, tempUnit, precUnit } = state.data;
   const i = state.hover;
   if (i < 0 || i >= times.length) return;
   const t = times[i];
-  const p = localParts(t, offset);
+  const p = localParts(t, tz);
 
   const lines = [];
   const hh = (x) => String(x).padStart(2, "0");
+  const hm = (q) => `${hh(q.h)}:${hh(q.min)}`; // minutes matter in half-hour zones
   if (which === "temp") {
     if (!Number.isFinite(temp.p50[i])) return;
-    lines.push(`${DAYS[p.day]} ${hh(p.h)}:00`);
+    lines.push(`${DAYS[p.day]} ${hm(p)}`);
     lines.push(`median ${temp.p50[i].toFixed(1)} ${tempUnit}`);
     lines.push(`${CI_LABEL}: ${temp.lo[i].toFixed(1)} … ${temp.hi[i].toFixed(1)}`);
   } else {
     if (!Number.isFinite(prec.p50[i])) return;
-    const pFrom = localParts(t - 6 * 3600, offset);
-    lines.push(`${DAYS[p.day]} ${hh(pFrom.h)}–${hh(p.h)}:00`);
+    const pFrom = localParts(t - 6 * 3600, tz);
+    lines.push(`${DAYS[p.day]} ${hm(pFrom)}–${hm(p)}`);
     lines.push(`median ${prec.p50[i].toFixed(1)} ${precUnit}, P${Math.round(CI_HI*100)}: ${prec.hi[i].toFixed(1)}`);
     lines.push(`P(rain) ${(prec.prob[i] * 100).toFixed(0)} %`);
   }
@@ -669,6 +754,7 @@ function drawHover(ctx, xs, w, hgt, which, y, yp) {
   const hBox = lines.length * 15 + 8;
   let bx = px + 8;
   if (bx + wBox > w - PAD.r) bx = px - 8 - wBox;
+  bx = Math.max(2, Math.min(bx, w - wBox - 2)); // keep the box on the canvas
   const by = PAD.t + 4;
   ctx.fillStyle = "rgba(255,255,255,0.94)";
   ctx.strokeStyle = cssVar("--grid");
@@ -757,7 +843,8 @@ searchEl.addEventListener("input", () => {
           sugEl.innerHTML = "";
           searchEl.value = r.name;
           loadForecast({ name: `${r.name}${meta ? ", " + meta : ""}`,
-                         latitude: r.latitude, longitude: r.longitude });
+                         latitude: r.latitude, longitude: r.longitude,
+                         timezone: r.timezone });
         });
         sugEl.appendChild(div);
       });
@@ -796,6 +883,8 @@ $("geoloc").addEventListener("click", () => {
       name: `${pos.coords.latitude.toFixed(3)}, ${pos.coords.longitude.toFixed(3)}`,
       latitude: pos.coords.latitude,
       longitude: pos.coords.longitude,
+      // The user is at this location, so the browser's zone is the right one.
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     }),
     (err) => setStatus("Geolocation failed: " + err.message, true),
     { timeout: 10000 }
@@ -803,6 +892,9 @@ $("geoloc").addEventListener("click", () => {
 });
 
 /* ---------------- init ---------------- */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
 document.querySelectorAll(".ci-label").forEach((el) => { el.textContent = CI_LABEL; });
 attachHover($("temp-chart"));
 attachHover($("precip-chart"));

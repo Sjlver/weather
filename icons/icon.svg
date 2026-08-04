@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- App icon source. PNGs in this directory are rendered from this file;
+       see README for the rendering commands. Palette matches the page:
+       bg #f7f6f2, ink #22303a, sun #e8a33d, rain #2d6b8a. -->
+  <rect width="512" height="512" fill="#f7f6f2"/>
+  <!-- sun, peeking out behind the cloud -->
+  <circle cx="352" cy="172" r="62" fill="#e8a33d"/>
+  <!-- cloud: outline layer (enlarged silhouette), then white fill -->
+  <g fill="#22303a">
+    <circle cx="185" cy="272" r="64"/>
+    <circle cx="258" cy="252" r="84"/>
+    <circle cx="330" cy="274" r="62"/>
+    <rect x="173" y="252" width="169" height="84"/>
+  </g>
+  <g fill="#ffffff">
+    <circle cx="185" cy="272" r="52"/>
+    <circle cx="258" cy="252" r="72"/>
+    <circle cx="330" cy="274" r="50"/>
+    <rect x="185" y="264" width="145" height="60"/>
+  </g>
+  <!-- rain -->
+  <g stroke="#2d6b8a" stroke-width="24" stroke-linecap="round">
+    <line x1="205" y1="368" x2="191" y2="410"/>
+    <line x1="265" y1="368" x2="251" y2="410"/>
+    <line x1="325" y1="368" x2="311" y2="410"/>
+  </g>
+</svg>
