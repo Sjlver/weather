@@ -292,7 +292,11 @@ async function loadForecast(place) {
     models: "google_weathernext2_ensemble",
     temporal_resolution: "native",
     timeformat: "unixtime",
-    timezone: "auto",
+    // GMT keeps the 6-hourly grid on the model's native steps (00/06/12/18
+    // UTC). With timezone=auto the API re-anchors the grid to *local*
+    // midnight (e.g. 22:00 UTC steps for Berlin), i.e. values interpolated
+    // off the native steps — see testdata/.
+    timezone: "GMT",
     forecast_days: "10",
   });
   let json;
@@ -307,7 +311,7 @@ async function loadForecast(place) {
 
   const h = json.hourly;
   const times = h.time; // unix seconds, UTC epoch
-  const tz = pickTimeZone(place, json);
+  const tz = pickTimeZone(place);
 
   // Collect ensemble members: "temperature_2m", "temperature_2m_member01", …
   const memberKeys = (base) =>
@@ -430,13 +434,12 @@ function localParts(unixSec, tz) {
   };
 }
 
-// Preference order: the place's own zone (geocoding / browser geolocation),
-// then whatever the forecast response reports, then the browser's zone.
-function pickTimeZone(place, json) {
-  for (const tz of [place.timezone, json.timezone]) {
-    if (tz) {
-      try { tzFormatter(tz); return tz; } catch (e) { /* unknown zone name */ }
-    }
+// The place's own zone (from geocoding, or the browser for geolocation),
+// falling back to the browser's zone. The forecast response can't help here:
+// it is requested with timezone=GMT, so its `timezone` field is always "GMT".
+function pickTimeZone(place) {
+  if (place.timezone) {
+    try { tzFormatter(place.timezone); return place.timezone; } catch (e) { /* unknown zone name */ }
   }
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
@@ -489,7 +492,11 @@ function drawTimeAxis(ctx, xs, w, hgt, tz) {
   const pxPer6h = xs.x(xs.t0 + H6) - xs.x(xs.t0);
   const pxPerDay = pxPer6h * 4;
 
-  // Ticks sit at the data timestamps (6-h multiples in UTC = interval right edges).
+  // Ticks sit at the data timestamps (interval right edges, plus the one
+  // interval xs extends to the left). Anchor them on the actual grid, not on
+  // 6-h multiples of UTC: the API is free to shift the grid (with
+  // timezone=auto it anchors to local midnight — see testdata/), and ticks
+  // that miss the data timestamps disagree with the tooltips.
   // Label them with the *local* hour, whatever it is (e.g. 02/08/14/20 for UTC+2).
   // Label every 1st/2nd/4th tick — whichever first leaves room between labels.
   // On very narrow screens even one label per day collides with its neighbour
@@ -499,8 +506,7 @@ function drawTimeAxis(ctx, xs, w, hgt, tz) {
   // Dense 6-h grid lines are noise on narrow screens; keep only midnight lines.
   const showHourGrid = pxPer6h >= 10;
 
-  const startTick = Math.ceil(xs.t0 / H6) * H6;
-  for (let t = startTick; t <= xs.t1; t += H6) {
+  for (let t = xs.t0; t <= xs.t1; t += H6) {
     const px = xs.x(t);
     if (showHourGrid) {
       ctx.strokeStyle = gridCol;
@@ -510,8 +516,9 @@ function drawTimeAxis(ctx, xs, w, hgt, tz) {
       ctx.lineTo(px, hgt - PAD.b);
       ctx.stroke();
     }
-    // Anchor on absolute tick numbers so the labelled hours match across days.
-    if (labelEvery && (t / H6) % labelEvery === 0) {
+    // Anchor on absolute tick numbers so the labelled hours match across days
+    // (rounded: with a shifted grid t is not an exact multiple of six hours).
+    if (labelEvery && Math.round(t / H6) % labelEvery === 0) {
       ctx.fillStyle = muted;
       ctx.fillText(String(localParts(t, tz).h).padStart(2, "0"), px, hgt - PAD.b + 14);
     }
