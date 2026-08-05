@@ -19,6 +19,11 @@ Live at <https://dev.purpureus.net/weather>.
   and per-timestamp offsets are computed with `Intl.DateTimeFormat` — the
   API's single `utc_offset_seconds` is not trusted, since it can be missing
   and is wrong across a DST change inside the forecast window.
+- The forecast is requested with `timezone=GMT`, not `timezone=auto`: `auto`
+  re-anchors the 6-hourly grid to local midnight, resampling values off the
+  model's native 00/06/12/18 UTC steps (see `testdata/`). With GMT the native
+  grid is kept and only the *display* is converted to local time, so tick and
+  tooltip hours land on the same instants (e.g. 02/08/14/20 in CEST).
 - Daily precipitation totals are computed member-wise first (sum each member's
   6-h values over the local day), then percentiles are taken across members.
 - Axis labels adapt to the chart width: hour labels thin out (and disappear on
