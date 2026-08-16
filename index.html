@@ -97,6 +97,8 @@
   }
   button:hover { border-color: var(--accent); }
   button:focus-visible { outline: 2px solid var(--accent); }
+  button:disabled { color: var(--muted); cursor: default; }
+  button:disabled:hover { border-color: var(--grid); }
   .suggestions {
     position: absolute;
     top: calc(100% + 2px);
@@ -207,6 +209,7 @@
     <div class="suggestions" id="suggestions" role="listbox"></div>
   </div>
   <button id="geoloc">Use my location</button>
+  <button id="share" disabled title="Get a link to the forecast location">Share this location</button>
 </div>
 <div id="status"></div>
 
@@ -246,6 +249,9 @@
   Weather data by <a href="https://open-meteo.com/">Open-Meteo</a> (CC BY 4.0), model:
   Google DeepMind WeatherNext 2 ensemble. Precipitation bars span the 6-hour interval
   <em>ending</em> at the labelled tick. Times shown in the location's local time.
+  Place names for coordinates from
+  <a href="https://nominatim.openstreetmap.org/">Nominatim</a> /
+  <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors (ODbL).
 </footer>
 
 <script>
@@ -253,7 +259,10 @@
 
 /* ---------------- state ---------------- */
 const state = {
-  place: null,        // {name, latitude, longitude}
+  // {name, latitude, longitude, timezone} the displayed forecast belongs to —
+  // set once one has loaded, so a request that fails leaves the page
+  // describing what is still on screen.
+  place: null,
   data: null,         // processed forecast
   hover: null,        // hovered time index or null
 };
@@ -265,6 +274,19 @@ function setStatus(msg, isError = false) {
   statusEl.textContent = msg;
   statusEl.classList.toggle("error", isError);
 }
+
+function showPlaceName() {
+  const members = state.data ? `${state.data.nMembers} members` : "64 members";
+  $("model-info").textContent =
+    `${members} · 6-hourly · ${state.place ? state.place.name : "via Open-Meteo"}`;
+}
+
+function rememberPlace(place) {
+  try { localStorage.setItem("wn_place", JSON.stringify(place)); } catch (e) {}
+}
+
+// Placeholder name while (or instead of) a reverse-geocoded one.
+const coordName = (lat, lon) => `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
 
 /* ---------------- percentiles ---------------- */
 // Central interval shown everywhere. 0.10/0.90 = 80 % CI; use 0.25/0.75 for IQR.
@@ -283,7 +305,6 @@ function quantile(sortedArr, q) {
 
 /* ---------------- fetch + process ---------------- */
 async function loadForecast(place) {
-  state.place = place;
   setStatus(`Loading forecast for ${place.name}…`);
   const params = new URLSearchParams({
     latitude: place.latitude,
@@ -373,10 +394,11 @@ async function loadForecast(place) {
     tempUnit: json.hourly_units.temperature_2m || "°C",
     precUnit: json.hourly_units.precipitation || "mm",
   };
-  $("model-info").textContent =
-    `${tKeys.length} members · 6-hourly · ${place.name}`;
   // Remember the place once a forecast actually loaded for it.
-  try { localStorage.setItem("wn_place", JSON.stringify(place)); } catch (e) {}
+  state.place = place;
+  $("share").disabled = false;
+  showPlaceName();
+  rememberPlace(place);
   setStatus("");
   drawAll();
   renderDailyTable();
@@ -823,6 +845,202 @@ function renderDailyTable() {
   panel.hidden = daily.length === 0;
 }
 
+/* ---------------- plus codes (Open Location Code) ----------------
+   Share links carry the location as a plus code rather than raw coordinates:
+   it is compact, URL-safe, and recognisable. The format is a public spec, and
+   small enough to implement here rather than take on a dependency —
+   https://github.com/google/open-location-code/blob/main/docs/olc_definition.adoc
+   Encoding only needs the "pair" section (the first 10 digits); decoding also
+   handles the optional grid digits, so a longer code pasted from elsewhere
+   (Google Maps hands out 10- and 11-digit codes) is understood too. */
+const OLC_ALPHABET = "23456789CFGHJMPQRVWX"; // 20 digits, base-20 positional
+const OLC_SEP = "+", OLC_SEP_POS = 8, OLC_PAD = "0";
+const OLC_PAIR_DIGITS = 10;                  // digits before the grid section
+const OLC_GRID_DIGITS = 5;                   // grid digits the format defines
+const OLC_GRID_ROWS = 5, OLC_GRID_COLS = 4;  // grid section subdivision
+
+// Digits put into a share link. Every pair of digits divides the cell by 20,
+// so 8 digits = 0.0025° ≈ 280 m and 6 digits = 0.05° ≈ 5 km. WeatherNext 2
+// runs on a 0.25° grid, so 6 would look like plenty — but rounding to a 5 km
+// cell still crosses into a neighbouring 0.25° cell about a fifth of the time,
+// and the code is also all the receiving browser has to look the place name up
+// from, where 5 km readily lands in the next town over. 8 digits keeps both
+// exact, and is the length a plus code normally comes in anyway.
+const SHARE_DIGITS = 8;
+
+// Encode to `digits` significant digits (even, 2…10). Returns the canonical
+// code: zero-padded to the separator, e.g. "8FW4V75V+" or "8FVC2200+".
+function olcEncode(lat, lng, digits) {
+  // Work in integer units of the finest position the format can express:
+  // 1/25 000 000° of latitude, 1/8 192 000° of longitude. Scaling the *signed*
+  // coordinate and only then shifting it positive is what the spec's reference
+  // implementation does, and the orders are not interchangeable: (91.2 × 8000)
+  // lands a hair below 729 600 in binary floating point, which would drop the
+  // code a whole cell to the south.
+  const LAT_P = 25000000, LNG_P = 8192000;
+  let latI = Math.floor(lat * LAT_P) + 90 * LAT_P;
+  latI = Math.min(Math.max(latI, 0), 180 * LAT_P - 1); // 90° N sits in the last cell
+  let lngI = (Math.floor(lng * LNG_P) + 180 * LNG_P) % (360 * LNG_P); // 180° E wraps to 180° W
+  if (lngI < 0) lngI += 360 * LNG_P;
+  let code = "";
+  for (let i = 0, latRes = 20 * LAT_P, lngRes = 20 * LNG_P;
+       i < OLC_PAIR_DIGITS / 2; i++, latRes /= 20, lngRes /= 20) {
+    code += OLC_ALPHABET[Math.floor(latI / latRes) % 20];
+    code += OLC_ALPHABET[Math.floor(lngI / lngRes) % 20];
+  }
+  code = code.slice(0, digits).padEnd(OLC_SEP_POS, OLC_PAD);
+  return code.slice(0, OLC_SEP_POS) + OLC_SEP + code.slice(OLC_SEP_POS);
+}
+
+// Decode to the centre of the area the code names, or null if it isn't one.
+// Case-insensitive, and the separator and padding may be left out — that is
+// how share links carry a code, since "+" would need escaping in a query
+// string. A separator that *is* there has to be in the right place: that is
+// what rejects "short" codes such as "2345+G6", which name an area only
+// relative to a reference location this page has no way to know.
+function olcDecode(code) {
+  let s = String(code).toUpperCase();
+  const sep = s.indexOf(OLC_SEP);
+  if (sep !== -1) {
+    if (sep !== OLC_SEP_POS || s.includes(OLC_SEP, sep + 1)) return null;
+    s = s.slice(0, sep) + s.slice(sep + 1);
+  }
+  const all = s.replace(/0+$/, "");
+  if (!all.length) return null;
+  if (all.length < OLC_PAIR_DIGITS && all.length % 2) return null;
+  if ([...all].some((ch) => !OLC_ALPHABET.includes(ch))) return null;
+  if (OLC_ALPHABET.indexOf(all[0]) > 8) return null;  // first pair would put the
+  if (OLC_ALPHABET.indexOf(all[1]) > 17) return null; // area past 90° N / 180° E
+  // A code may carry more digits than the format defines. They still have to
+  // be digits, but they name nothing, so they are dropped rather than
+  // rejected — hence the truncation only after the checks above.
+  const digits = all.slice(0, OLC_PAIR_DIGITS + OLC_GRID_DIGITS);
+
+  // South-west corner of the area, refined digit pair by digit pair.
+  let lat = -90, lng = -180, latRes = 20, lngRes = 20;
+  const pairDigits = Math.min(digits.length, OLC_PAIR_DIGITS);
+  for (let i = 0; i < pairDigits; i += 2) {
+    if (i) { latRes /= 20; lngRes /= 20; }
+    lat += OLC_ALPHABET.indexOf(digits[i]) * latRes;
+    lng += OLC_ALPHABET.indexOf(digits[i + 1]) * lngRes;
+  }
+  // Grid section: each further digit splits the cell 4 columns × 5 rows,
+  // numbered left to right, bottom to top.
+  for (let i = OLC_PAIR_DIGITS; i < digits.length; i++) {
+    latRes /= OLC_GRID_ROWS;
+    lngRes /= OLC_GRID_COLS;
+    const v = OLC_ALPHABET.indexOf(digits[i]);
+    lat += Math.floor(v / OLC_GRID_COLS) * latRes;
+    lng += (v % OLC_GRID_COLS) * lngRes;
+  }
+  return { latitude: lat + latRes / 2, longitude: lng + lngRes / 2 };
+}
+
+/* ---------------- coordinates -> place ---------------- */
+// Open-Meteo's geocoding API is forward-only (open-meteo/open-meteo#698), so
+// this is the one request the page makes to a service other than Open-Meteo.
+// Nominatim is free and needs no key; its usage policy caps clients at one
+// request a second, which is far above what a single visitor here does (one
+// lookup per location change).
+async function reverseGeocode(lat, lon) {
+  try {
+    const res = await fetch("https://nominatim.openstreetmap.org/reverse?" +
+      new URLSearchParams({
+        format: "jsonv2", lat, lon,
+        zoom: "12",           // town level: no house numbers, no bare county
+        addressdetails: "1",
+        "accept-language": "en",
+      }));
+    if (!res.ok) return null;
+    const a = (await res.json()).address;
+    if (!a) return null;
+    const local = a.city || a.town || a.village || a.municipality ||
+                  a.hamlet || a.suburb || a.county;
+    // Dedupe so city states don't come out as "Berlin, Berlin, Germany".
+    const parts = [...new Set([local, a.state, a.country].filter(Boolean))];
+    return parts.length ? parts.join(", ") : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// The IANA zone a coordinate sits in. Needed for shared links, which are
+// routinely opened from a different zone than the one they point at, so the
+// browser's zone is no help. The ensemble request can't answer this: it has to
+// stay on timezone=GMT (see loadForecast), which echoes back "GMT".
+async function lookupTimeZone(lat, lon) {
+  try {
+    const res = await fetch("https://api.open-meteo.com/v1/forecast?" +
+      new URLSearchParams({
+        latitude: lat, longitude: lon, timezone: "auto",
+        forecast_days: "1", current: "temperature_2m", // smallest valid payload
+      }));
+    if (!res.ok) return null;
+    return (await res.json()).timezone || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Replace a coordinate-derived name with a real one, in the background: the
+// forecast doesn't depend on it, so nobody waits on the reverse geocoder.
+async function nameFromCoords(place) {
+  const name = await reverseGeocode(place.latitude, place.longitude);
+  if (!name || place.name === name) return;
+  place.name = name;
+  // If the forecast is still in flight it will pick the name up on its own
+  // when it lands; if it has already been superseded, this place is history.
+  if (state.place === place) { showPlaceName(); rememberPlace(place); }
+}
+
+// Load the place a share link points at. Returns false if the code is junk.
+async function loadFromCode(code) {
+  const cell = olcDecode(code);
+  if (!cell) { setStatus(`“${code}” is not a valid plus code.`, true); return false; }
+  setStatus("Loading shared location…");
+  const place = {
+    // Show the code until the reverse geocoder comes back with a name.
+    name: olcEncode(cell.latitude, cell.longitude, SHARE_DIGITS),
+    latitude: cell.latitude,
+    longitude: cell.longitude,
+    timezone: await lookupTimeZone(cell.latitude, cell.longitude),
+  };
+  nameFromCoords(place);
+  await loadForecast(place);
+  return true;
+}
+
+function shareUrl(place) {
+  const url = new URL(location.href);
+  // The separator would have to be percent-escaped in a query string, and it
+  // carries no information; olcDecode puts it back.
+  url.search = "?" + new URLSearchParams({
+    at: olcEncode(place.latitude, place.longitude, SHARE_DIGITS).replace(OLC_SEP, ""),
+  });
+  url.hash = "";
+  return url.href;
+}
+
+$("share").addEventListener("click", async () => {
+  if (!state.place) return;
+  const url = shareUrl(state.place);
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: "WeatherNext ensemble", url });
+      return;
+    } catch (e) {
+      if (e.name === "AbortError") return; // share sheet dismissed
+      // anything else: fall through to the clipboard
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    setStatus("Link copied: " + url);
+  } catch (e) {
+    setStatus("Link to this location: " + url);
+  }
+});
+
 /* ---------------- geocoding ---------------- */
 const searchEl = $("search");
 const sugEl = $("suggestions");
@@ -886,13 +1104,18 @@ $("geoloc").addEventListener("click", () => {
   if (!navigator.geolocation) { setStatus("Geolocation not available.", true); return; }
   setStatus("Locating…");
   navigator.geolocation.getCurrentPosition(
-    (pos) => loadForecast({
-      name: `${pos.coords.latitude.toFixed(3)}, ${pos.coords.longitude.toFixed(3)}`,
-      latitude: pos.coords.latitude,
-      longitude: pos.coords.longitude,
-      // The user is at this location, so the browser's zone is the right one.
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }),
+    (pos) => {
+      const place = {
+        name: coordName(pos.coords.latitude, pos.coords.longitude),
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+        // The user is at this location, so the browser's zone is the right one.
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      };
+      // Swap the coordinates for a place name as soon as one is available.
+      nameFromCoords(place);
+      loadForecast(place);
+    },
     (err) => setStatus("Geolocation failed: " + err.message, true),
     { timeout: 10000 }
   );
@@ -910,12 +1133,23 @@ window.addEventListener("resize", drawAll);
 if (document.fonts?.ready) document.fonts.ready.then(drawAll);
 // redraw the "now" line every minute
 setInterval(drawAll, 60 * 1000);
-try {
-  const saved = localStorage.getItem("wn_place");
-  if (saved) loadForecast(JSON.parse(saved));
-  else setStatus("Search for a place or use your location to start.");
-} catch (e) {
-  setStatus("Search for a place or use your location to start.");
+function loadSavedPlace() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("wn_place")); } catch (e) { /* corrupt */ }
+  if (saved) loadForecast(saved);
+  // Don't talk over a complaint about the link that got us here.
+  else if (!statusEl.textContent) setStatus("Search for a place or use your location to start.");
+}
+
+const sharedCode = new URLSearchParams(location.search).get("at");
+if (sharedCode) {
+  // Drop the parameter once it has been taken in. The shared place is stored
+  // like any other from here on, so a later reload should show whatever the
+  // visitor last picked rather than snapping back to the link's location.
+  history.replaceState(null, "", location.pathname + location.hash);
+  loadFromCode(sharedCode).then((ok) => { if (!ok) loadSavedPlace(); });
+} else {
+  loadSavedPlace();
 }
 </script>
 </body>
