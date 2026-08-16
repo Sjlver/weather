@@ -304,7 +304,11 @@ function quantile(sortedArr, q) {
 }
 
 /* ---------------- fetch + process ---------------- */
-async function loadForecast(place) {
+// `pendingTimeZone`, when given, is a promise for the place's IANA zone that
+// the caller has already started. The zone isn't needed until the forecast is
+// in hand, so handing it over unresolved lets the two requests overlap
+// instead of queueing behind each other.
+async function loadForecast(place, pendingTimeZone) {
   setStatus(`Loading forecast for ${place.name}…`);
   const params = new URLSearchParams({
     latitude: place.latitude,
@@ -332,6 +336,8 @@ async function loadForecast(place) {
 
   const h = json.hourly;
   const times = h.time; // unix seconds, UTC epoch
+  // Settle the zone onto the place before anything reads or stores it.
+  if (pendingTimeZone) place.timezone = await pendingTimeZone;
   const tz = pickTimeZone(place);
 
   // Collect ensemble members: "temperature_2m", "temperature_2m_member01", …
@@ -1003,10 +1009,12 @@ async function loadFromCode(code) {
     name: olcEncode(cell.latitude, cell.longitude, SHARE_DIGITS),
     latitude: cell.latitude,
     longitude: cell.longitude,
-    timezone: await lookupTimeZone(cell.latitude, cell.longitude),
+    timezone: null,
   };
+  // Name and zone are both looked up alongside the forecast, which is by far
+  // the largest of the three downloads, so neither delays the page.
   nameFromCoords(place);
-  await loadForecast(place);
+  await loadForecast(place, lookupTimeZone(cell.latitude, cell.longitude));
   return true;
 }
 
