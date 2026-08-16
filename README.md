@@ -10,7 +10,8 @@ Live at <https://dev.purpureus.net/weather>.
 
 ## Design notes
 
-- A single static `index.html`, no build step and no dependencies. Network
+- A single static `index.html`, no build step and no runtime dependencies (the
+  tests need only a stock `node`). Network
   requests go to Open-Meteo (the forecast, place search, and the time zone of a
   bare coordinate) and to Nominatim (the name of a bare coordinate).
 - Fonts are self-hosted ([Inter](https://rsms.me/inter/), SIL OFL 1.1, see
@@ -19,7 +20,9 @@ Live at <https://dev.purpureus.net/weather>.
   zone comes from the geocoding result, from the browser for "use my location",
   or — for a shared link, which is routinely opened from a different zone than
   it points at — from a small `timezone=auto` request to the forecast API.
-  Per-timestamp offsets are computed with `Intl.DateTimeFormat` — the
+  That request is handed to `loadForecast` unresolved so it runs alongside the
+  much larger ensemble download, which is the only thing that has to finish
+  before the zone is needed. Per-timestamp offsets are computed with `Intl.DateTimeFormat` — the
   API's single `utc_offset_seconds` is not trusted, since it can be missing
   and is wrong across a DST change inside the forecast window.
 - Coordinates get a name. "Use my location" and shared links are labelled with
@@ -47,10 +50,9 @@ Live at <https://dev.purpureus.net/weather>.
   point that can sit in the next town. Encoding scales the signed coordinate
   before shifting it positive, as the reference implementation does; the other
   order rounds a hair the wrong way at cell boundaries and drops codes a whole
-  cell south. Checked against the encoding, decoding and validity test vectors
-  in [google/open-location-code](https://github.com/google/open-location-code/tree/main/test_data)
-  and fuzzed against its JS implementation — worth redoing if that code is ever
-  touched.
+  cell south. `test/` checks all of this against the official test vectors;
+  both of those subtleties were found that way, and both are still caught if
+  reintroduced.
 - The forecast is requested with `timezone=GMT`, not `timezone=auto`: `auto`
   re-anchors the 6-hourly grid to local midnight, resampling values off the
   model's native 00/06/12/18 UTC steps (see `testdata/`). With GMT the native
@@ -81,3 +83,19 @@ then open <http://localhost:8000/>.
 Note that the page registers a service worker (needed for Android install).
 It fetches network-first, so a normal reload always picks up local edits; use
 DevTools → Application → Service workers → Unregister if it gets in the way.
+
+### Tests
+
+```sh
+node --test
+```
+
+`test/plus-codes.test.mjs` reads the plus-code functions straight out of
+`index.html` — there is no copy to drift — and runs them against the encoding,
+decoding and validity vectors vendored into `test/open-location-code/`. No
+package.json, no network, nothing to install.
+
+Only the plus-code arithmetic is covered, because it is the part that is easy
+to get subtly and invisibly wrong. The rest of the page was checked by driving
+it in a browser with the network stubbed; that suite needs Playwright and a
+CI runner to be worth keeping, so it is not committed.
