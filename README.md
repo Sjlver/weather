@@ -10,15 +10,47 @@ Live at <https://dev.purpureus.net/weather>.
 
 ## Design notes
 
-- A single static `index.html`, no build step and no dependencies. The only
-  network requests the page makes are to Open-Meteo (forecast + geocoding).
+- A single static `index.html`, no build step and no dependencies. Network
+  requests go to Open-Meteo (the forecast, place search, and the time zone of a
+  bare coordinate) and to Nominatim (the name of a bare coordinate).
 - Fonts are self-hosted ([Inter](https://rsms.me/inter/), SIL OFL 1.1, see
   `fonts/OFL.txt`).
 - All times are shown in the forecast location's local time. The IANA time
-  zone comes from the geocoding result (or the browser for "use my location"),
-  and per-timestamp offsets are computed with `Intl.DateTimeFormat` — the
+  zone comes from the geocoding result, from the browser for "use my location",
+  or — for a shared link, which is routinely opened from a different zone than
+  it points at — from a small `timezone=auto` request to the forecast API.
+  Per-timestamp offsets are computed with `Intl.DateTimeFormat` — the
   API's single `utc_offset_seconds` is not trusted, since it can be missing
   and is wrong across a DST change inside the forecast window.
+- Coordinates get a name. "Use my location" and shared links are labelled with
+  the coordinates (or the plus code) to start with, and relabelled once
+  Nominatim's reverse geocoder answers. The forecast never waits on that
+  request, and a lookup that fails just leaves the coordinates showing.
+  Open-Meteo's own geocoding API is forward-only, so this is the one request
+  the page makes to a service other than Open-Meteo
+  ([open-meteo#698](https://github.com/open-meteo/open-meteo/discussions/698)).
+- "Share this location" hands over a link like `?at=8FW4V75V`, carrying an
+  [Open Location Code](https://github.com/google/open-location-code) ("plus
+  code"). Opening one decodes the code, looks up the location's name and time
+  zone, and stores it exactly like a place picked from the search box — then
+  drops the parameter from the address bar, so a later reload shows whatever
+  the visitor last chose rather than snapping back to the link. The `+`
+  separator is left out of the URL, where it would have to be escaped as `%2B`
+  to not mean a space; the decoder puts it back, and also takes full-length
+  codes pasted from elsewhere.
+- Plus codes are encoded and decoded in the page (~40 lines): the format is a
+  published spec, and pulling in a library would be more code than the thing
+  it does. The share precision is eight digits, 0.0025° ≈ 280 m. WeatherNext 2
+  runs on a 0.25° grid, so the *forecast* alone would be happy with six digits
+  (0.05° ≈ 5 km) — but rounding that coarsely still lands in a neighbouring
+  grid cell about a fifth of the time, and it hands the reverse geocoder a
+  point that can sit in the next town. Encoding scales the signed coordinate
+  before shifting it positive, as the reference implementation does; the other
+  order rounds a hair the wrong way at cell boundaries and drops codes a whole
+  cell south. Checked against the encoding, decoding and validity test vectors
+  in [google/open-location-code](https://github.com/google/open-location-code/tree/main/test_data)
+  and fuzzed against its JS implementation — worth redoing if that code is ever
+  touched.
 - The forecast is requested with `timezone=GMT`, not `timezone=auto`: `auto`
   re-anchors the 6-hourly grid to local midnight, resampling values off the
   model's native 00/06/12/18 UTC steps (see `testdata/`). With GMT the native
