@@ -1,7 +1,7 @@
 {
   "name": "WeatherNext ensemble",
   "short_name": "Weather",
-  "description": "Ensemble weather forecast (WeatherNext 2 via Open-Meteo): temperature and precipitation with uncertainty bands.",
+  "description": "Ensemble weather forecast (WeatherNext 2 via Open-Meteo): temperature, precipitation and wind with uncertainty bands.",
   "id": "./",
   "start_url": "./",
   "scope": "./",
