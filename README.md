@@ -54,10 +54,11 @@ Live at <https://dev.purpureus.net/weather>.
   both of those subtleties were found that way, and both are still caught if
   reintroduced.
 - The forecast is requested with `timezone=GMT`, not `timezone=auto`: `auto`
-  re-anchors the 6-hourly grid to local midnight, resampling values off the
-  model's native 00/06/12/18 UTC steps (see `testdata/`). With GMT the native
-  grid is kept and only the *display* is converted to local time, so tick and
-  tooltip hours land on the same instants (e.g. 02/08/14/20 in CEST).
+  re-anchors the 6-hourly grid to local midnight and hands out the native
+  values relabelled onto it, i.e. a few hours stale (see `testdata/`). With
+  GMT the native grid is kept and only the *display* is converted to local
+  time, so tick and tooltip hours land on the same instants (e.g. 02/08/14/20
+  in CEST).
 - Daily precipitation totals are computed member-wise first (sum each member's
   6-h values over the local day), then percentiles are taken across members.
 - Wind is the 10 m wind, which is what matters on the ground and what the
@@ -116,8 +117,11 @@ to drift. No package.json, no network, nothing to install.
 - `test/time.test.mjs` covers the local-time helpers: per-instant zone
   offsets (DST inside the window, half-hour zones), the local-midnight
   arithmetic on a 25-hour DST day, and the interval labels.
+- `test/forecast.test.mjs` runs the forecast processing (percentiles, the
+  mean wind vector, daily totals) over the captured API responses in
+  `testdata/`, and pins down what those captures show about the API.
 
 Only this arithmetic is covered, because it is the part that is easy to get
-subtly and invisibly wrong. The rest of the page was checked by driving it in
-a browser with the network stubbed; that suite needs Playwright and a CI
-runner to be worth keeping, so it is not committed.
+subtly and invisibly wrong. The drawing was checked by driving the page in a
+browser with the forecast request stubbed; that suite needs Playwright and a
+CI runner to be worth keeping, so it is not committed.
