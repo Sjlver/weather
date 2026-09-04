@@ -228,7 +228,7 @@
   </div>
   <div class="chart-panel">
     <div class="chart-title">
-      <span>Precipitation (6 h totals)</span>
+      <span id="precip-title">Precipitation (6 h totals)</span>
       <span class="legend"><span class="swatch" style="background:var(--rain-band)"></span>median (bar) · whisker to <span class="ci-label">80 %</span></span>
       <span class="legend"><span class="swatch" style="background:var(--prob)"></span>P(&gt; 0.1 mm)</span>
     </div>
@@ -318,45 +318,14 @@ function quantile(sortedArr, q) {
   return sortedArr[lo] + (sortedArr[hi] - sortedArr[lo]) * (pos - lo);
 }
 
-/* ---------------- fetch + process ---------------- */
-// `pendingTimeZone`, when given, is a promise for the place's IANA zone that
-// the caller has already started. The zone isn't needed until the forecast is
-// in hand, so handing it over unresolved lets the two requests overlap
-// instead of queueing behind each other.
-async function loadForecast(place, pendingTimeZone) {
-  setStatus(`Loading forecast for ${place.name}…`);
-  const params = new URLSearchParams({
-    latitude: place.latitude,
-    longitude: place.longitude,
-    // WeatherNext 2 carries 10 m wind as u/v components; Open-Meteo derives
-    // speed and direction from them. It has no gust field, so none is asked for.
-    hourly: "temperature_2m,precipitation,wind_speed_10m,wind_direction_10m",
-    models: "google_weathernext2_ensemble",
-    temporal_resolution: "native",
-    timeformat: "unixtime",
-    // GMT keeps the 6-hourly grid on the model's native steps (00/06/12/18
-    // UTC). With timezone=auto the API re-anchors the grid to *local*
-    // midnight (e.g. 22:00 UTC steps for Berlin), i.e. values interpolated
-    // off the native steps — see testdata/.
-    timezone: "GMT",
-    forecast_days: "10",
-  });
-  let json;
-  try {
-    const res = await fetch("https://ensemble-api.open-meteo.com/v1/ensemble?" + params);
-    json = await res.json();
-    if (!res.ok || json.error) throw new Error(json.reason || res.statusText);
-  } catch (e) {
-    setStatus("Could not load forecast: " + e.message, true);
-    return;
-  }
-
+/* ---------------- process ---------------- */
+// Turn an ensemble response into what the page draws: per-step percentiles
+// across the members, the mean wind vector, and member-wise daily totals in
+// the location's zone `tz`. No fetching and no DOM in here, so a captured
+// response (testdata/) can be run through it in a test.
+function processForecast(json, tz) {
   const h = json.hourly;
   const times = h.time; // unix seconds, UTC epoch
-  // Settle the zone onto the place before anything reads or stores it.
-  if (pendingTimeZone) place.timezone = await pendingTimeZone;
-  const tz = pickTimeZone(place);
-
   // Collect ensemble members: "temperature_2m", "temperature_2m_member01", …
   const memberKeys = (base) =>
     Object.keys(h).filter((k) => k === base || k.startsWith(base + "_member"));
@@ -431,7 +400,7 @@ async function loadForecast(place, pendingTimeZone) {
     };
   });
 
-  state.data = {
+  return {
     times, tz, temp, prec, daily,
     // Wind stays out of the page (panel hidden) if the model didn't return any.
     wind: wind.p50.some(Number.isFinite) ? wind : null,
@@ -440,6 +409,44 @@ async function loadForecast(place, pendingTimeZone) {
     precUnit: json.hourly_units.precipitation || "mm",
     windUnit: json.hourly_units.wind_speed_10m || "km/h",
   };
+}
+
+/* ---------------- fetch ---------------- */
+// `pendingTimeZone`, when given, is a promise for the place's IANA zone that
+// the caller has already started. The zone isn't needed until the forecast is
+// in hand, so handing it over unresolved lets the two requests overlap
+// instead of queueing behind each other.
+async function loadForecast(place, pendingTimeZone) {
+  setStatus(`Loading forecast for ${place.name}…`);
+  const params = new URLSearchParams({
+    latitude: place.latitude,
+    longitude: place.longitude,
+    // WeatherNext 2 carries 10 m wind as u/v components; Open-Meteo derives
+    // speed and direction from them. It has no gust field, so none is asked for.
+    hourly: "temperature_2m,precipitation,wind_speed_10m,wind_direction_10m",
+    models: "google_weathernext2_ensemble",
+    temporal_resolution: "native",
+    timeformat: "unixtime",
+    // GMT keeps the 6-hourly grid on the model's native steps (00/06/12/18
+    // UTC). With timezone=auto the API re-anchors the grid to *local*
+    // midnight (e.g. 22:00 UTC steps for Berlin), i.e. values interpolated
+    // off the native steps — see testdata/.
+    timezone: "GMT",
+    forecast_days: "10",
+  });
+  let json;
+  try {
+    const res = await fetch("https://ensemble-api.open-meteo.com/v1/ensemble?" + params);
+    json = await res.json();
+    if (!res.ok || json.error) throw new Error(json.reason || res.statusText);
+  } catch (e) {
+    setStatus("Could not load forecast: " + e.message, true);
+    return;
+  }
+
+  // Settle the zone onto the place before anything reads or stores it.
+  if (pendingTimeZone) place.timezone = await pendingTimeZone;
+  state.data = processForecast(json, pickTimeZone(place));
   // Remember the place once a forecast actually loaded for it.
   state.place = place;
   $("share").disabled = false;
@@ -447,7 +454,9 @@ async function loadForecast(place, pendingTimeZone) {
   rememberPlace(place);
   setStatus("");
   $("wind-panel").hidden = !state.data.wind;
-  // The unit goes in the title: "100 km/h" is too wide for the axis gutter.
+  // Units go in the titles: "0.25 mm" and "100 km/h" are too wide for the
+  // axis gutter, which is sized for the temperature chart's "27.5°".
+  $("precip-title").textContent = `Precipitation (6 h totals, ${state.data.precUnit})`;
   $("wind-title").textContent = `Wind (10 m, ${state.data.windUnit})`;
   drawAll();
   renderDailyTable();
@@ -741,7 +750,7 @@ function drawTempChart() {
 }
 
 function drawPrecipChart() {
-  const { times, tz, prec, precUnit } = state.data;
+  const { times, tz, prec } = state.data;
   const canvas = $("precip-chart");
   const { ctx, w, hgt } = setupCanvas(canvas);
   const xs = makeXScale(times, w);
@@ -755,10 +764,13 @@ function drawPrecipChart() {
 
   drawTimeAxis(ctx, xs, w, hgt, tz);
 
-  // left axis (mm)
+  // left axis (mm; the unit is in the panel title)
   ctx.font = "11px Inter, system-ui, sans-serif";
   const step = niceStep(y1 - y0, 5);
-  for (let v = 0; v <= y1; v += step) {
+  // As many decimals as the step needs: 0.25 steps on a dry week, not "0.3".
+  let decimals = 0;
+  while (decimals < 3 && Math.abs(step * 10 ** decimals - Math.round(step * 10 ** decimals)) > 1e-9) decimals++;
+  for (let v = 0; v <= y1 + 1e-9; v += step) {
     ctx.strokeStyle = cssVar("--grid");
     ctx.lineWidth = 0.6;
     ctx.beginPath();
@@ -767,7 +779,7 @@ function drawPrecipChart() {
     ctx.stroke();
     ctx.fillStyle = cssVar("--muted");
     ctx.textAlign = "right";
-    ctx.fillText(Math.round(v * 10) / 10 + " " + precUnit, PAD.l - 6, y(v) + 4);
+    ctx.fillText(v.toFixed(decimals), PAD.l - 6, y(v) + 4);
   }
   // right axis (%)
   ctx.textAlign = "left";
