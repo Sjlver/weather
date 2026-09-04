@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Ensemble weather forecast (WeatherNext 2 via Open-Meteo): temperature and precipitation with uncertainty bands.">
+<meta name="description" content="Ensemble weather forecast (WeatherNext 2 via Open-Meteo): temperature, precipitation and wind with uncertainty bands.">
 <meta name="theme-color" content="#f7f6f2">
 <title>WeatherNext ensemble</title>
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🌦</text></svg>'>
@@ -39,6 +39,8 @@
     --rain: #2d6b8a;
     --rain-band: rgba(45, 107, 138, 0.55);
     --prob: #7a5c9e;
+    --wind: #2f8f5c;
+    --wind-band: rgba(47, 143, 92, 0.18);
     --now: #22303a;
     --accent: #2d6b8a;
     font-size: 15px;
@@ -151,6 +153,8 @@
     margin-right: 0.3em;
   }
   canvas { display: block; width: 100%; height: 260px; }
+  /* room for the direction-arrow strip above the plot */
+  #wind-chart { height: 284px; }
   table {
     width: 100%;
     border-collapse: collapse;
@@ -243,12 +247,23 @@
     <p class="table-note">Each 6-h interval is assigned to the local day of its midpoint;
       days with fewer than four intervals are marked “partial”.</p>
   </div>
+  <div class="chart-panel" id="wind-panel">
+    <div class="chart-title">
+      <span id="wind-title">Wind (10 m)</span>
+      <span class="legend"><span class="swatch" style="background:var(--wind)"></span>median</span>
+      <span class="legend"><span class="swatch" style="background:var(--wind-band)"></span><span class="ci-label">80 %</span></span>
+      <span class="legend">arrows point downwind (ensemble mean)</span>
+    </div>
+    <canvas id="wind-chart" height="284"></canvas>
+  </div>
 </div>
 
 <footer>
   Weather data by <a href="https://open-meteo.com/">Open-Meteo</a> (CC BY 4.0), model:
   Google DeepMind WeatherNext 2 ensemble. Precipitation bars span the 6-hour interval
-  <em>ending</em> at the labelled tick. Times shown in the location's local time.
+  <em>ending</em> at the labelled tick; temperature and wind are the values <em>at</em> the tick.
+  Wind is the model's 0.25° grid-cell average, so gusts and the peak winds of a
+  tropical cyclone run higher than shown. Times shown in the location's local time.
   Place names for coordinates from
   <a href="https://nominatim.openstreetmap.org/">Nominatim</a> /
   <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors (ODbL).
@@ -313,7 +328,9 @@ async function loadForecast(place, pendingTimeZone) {
   const params = new URLSearchParams({
     latitude: place.latitude,
     longitude: place.longitude,
-    hourly: "temperature_2m,precipitation",
+    // WeatherNext 2 carries 10 m wind as u/v components; Open-Meteo derives
+    // speed and direction from them. It has no gust field, so none is asked for.
+    hourly: "temperature_2m,precipitation,wind_speed_10m,wind_direction_10m",
     models: "google_weathernext2_ensemble",
     temporal_resolution: "native",
     timeformat: "unixtime",
@@ -346,10 +363,13 @@ async function loadForecast(place, pendingTimeZone) {
 
   const tKeys = memberKeys("temperature_2m");
   const pKeys = memberKeys("precipitation");
+  const wKeys = memberKeys("wind_speed_10m");
+  const dKeys = memberKeys("wind_direction_10m");
 
   const n = times.length;
   const temp = { lo: [], p50: [], hi: [] };
   const prec = { lo: [], p50: [], hi: [], prob: [] };
+  const wind = { lo: [], p50: [], hi: [], dir: [] };
 
   for (let i = 0; i < n; i++) {
     const tv = tKeys.map((k) => h[k][i]).filter((v) => v != null).sort((a, b) => a - b);
@@ -362,6 +382,23 @@ async function loadForecast(place, pendingTimeZone) {
     prec.p50.push(quantile(pv, 0.50));
     prec.hi.push(quantile(pv, CI_HI));
     prec.prob.push(pv.length ? pv.filter((v) => v > 0.1).length / pv.length : NaN);
+
+    const wv = wKeys.map((k) => h[k][i]).filter((v) => v != null).sort((a, b) => a - b);
+    wind.lo.push(quantile(wv, CI_LO));
+    wind.p50.push(quantile(wv, 0.50));
+    wind.hi.push(quantile(wv, CI_HI));
+    // Direction: average the members' wind *vectors*, so 350° and 10° come
+    // out as north rather than as their arithmetic mean, south. The API's
+    // direction is meteorological (where the wind blows from), 0° = north.
+    let u = 0, v = 0, got = 0;
+    for (const k of dKeys) {
+      const d = h[k][i], spd = h[k.replace("wind_direction_10m", "wind_speed_10m")]?.[i];
+      if (d == null || spd == null) continue;
+      u -= spd * Math.sin(d * Math.PI / 180);
+      v -= spd * Math.cos(d * Math.PI / 180);
+      got++;
+    }
+    wind.dir.push(got && (u || v) ? (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360 : NaN);
   }
 
   // ---- daily totals: sum per member first, then percentiles across members ----
@@ -396,9 +433,12 @@ async function loadForecast(place, pendingTimeZone) {
 
   state.data = {
     times, tz, temp, prec, daily,
+    // Wind stays out of the page (panel hidden) if the model didn't return any.
+    wind: wind.p50.some(Number.isFinite) ? wind : null,
     nMembers: tKeys.length,
     tempUnit: json.hourly_units.temperature_2m || "°C",
     precUnit: json.hourly_units.precipitation || "mm",
+    windUnit: json.hourly_units.wind_speed_10m || "km/h",
   };
   // Remember the place once a forecast actually loaded for it.
   state.place = place;
@@ -406,6 +446,9 @@ async function loadForecast(place, pendingTimeZone) {
   showPlaceName();
   rememberPlace(place);
   setStatus("");
+  $("wind-panel").hidden = !state.data.wind;
+  // The unit goes in the title: "100 km/h" is too wide for the axis gutter.
+  $("wind-title").textContent = `Wind (10 m, ${state.data.windUnit})`;
   drawAll();
   renderDailyTable();
 }
@@ -474,6 +517,24 @@ function pickTimeZone(place) {
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
+// "20:00" — minutes matter in half-hour zones such as India's.
+const hhmm = (p) => `${String(p.h).padStart(2, "0")}:${String(p.min).padStart(2, "0")}`;
+
+// Label for the interval (from, to]: "Sat 02:00–08:00", or, when it crosses
+// local midnight, "Fri 20:00 – Sat 02:00" — the weekday belongs to each end,
+// and the end's day alone would put the evening on the wrong day.
+function rangeLabel(from, to, tz) {
+  const a = localParts(from, tz), b = localParts(to, tz);
+  return a.date === b.date
+    ? `${DAYS[b.day]} ${hhmm(a)}–${hhmm(b)}`
+    : `${DAYS[a.day]} ${hhmm(a)} – ${DAYS[b.day]} ${hhmm(b)}`;
+}
+
+// 16-point compass name for a direction in degrees (0 = N, clockwise).
+const COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                 "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+const compass = (deg) => COMPASS[Math.round(deg / 22.5) % 16];
+
 /* ---------------- drawing ---------------- */
 const PAD = { l: 44, r: 44, t: 10, b: 38 };
 
@@ -512,7 +573,9 @@ function makeXScale(times, w) {
   };
 }
 
-function drawTimeAxis(ctx, xs, w, hgt, tz) {
+// `top` is where the plot area starts: PAD.t unless a chart reserves a strip
+// above it (the wind chart's direction arrows).
+function drawTimeAxis(ctx, xs, w, hgt, tz, top = PAD.t) {
   ctx.font = "11px Inter, system-ui, sans-serif";
   ctx.textAlign = "center";
   const gridCol = cssVar("--grid"), muted = cssVar("--muted"), ink = cssVar("--ink");
@@ -540,7 +603,7 @@ function drawTimeAxis(ctx, xs, w, hgt, tz) {
       ctx.strokeStyle = gridCol;
       ctx.lineWidth = 0.6;
       ctx.beginPath();
-      ctx.moveTo(px, PAD.t);
+      ctx.moveTo(px, top);
       ctx.lineTo(px, hgt - PAD.b);
       ctx.stroke();
     }
@@ -574,7 +637,7 @@ function drawTimeAxis(ctx, xs, w, hgt, tz) {
       ctx.strokeStyle = gridCol;
       ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.moveTo(px, PAD.t);
+      ctx.moveTo(px, top);
       ctx.lineTo(px, hgt - PAD.b);
       ctx.stroke();
     }
@@ -593,7 +656,7 @@ function drawTimeAxis(ctx, xs, w, hgt, tz) {
   }
 }
 
-function drawNowLine(ctx, xs, hgt) {
+function drawNowLine(ctx, xs, hgt, top = PAD.t) {
   const now = Date.now() / 1000;
   if (now < xs.t0 || now > xs.t1) return;
   const px = xs.x(now);
@@ -602,15 +665,43 @@ function drawNowLine(ctx, xs, hgt) {
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 3]);
   ctx.beginPath();
-  ctx.moveTo(px, PAD.t);
+  ctx.moveTo(px, top);
   ctx.lineTo(px, hgt - PAD.b);
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.fillStyle = cssVar("--now");
   ctx.font = "10px Inter, system-ui, sans-serif";
   ctx.textAlign = "left";
-  ctx.fillText("now", px + 4, PAD.t + 10);
+  ctx.fillText("now", px + 4, top + 10);
   ctx.restore();
+}
+
+// Median line with the CI band behind it, for series that are instantaneous
+// at the tick (temperature, wind): points sit at the timestamps, and a gap in
+// the data breaks the line rather than bridging it.
+function drawBandAndMedian(ctx, xs, times, series, y, colour, bandColour) {
+  const seg = [];
+  const flush = () => {
+    if (seg.length < 2) { seg.length = 0; return; }
+    ctx.beginPath();
+    seg.forEach(([px, hiY], i) => i ? ctx.lineTo(px, hiY) : ctx.moveTo(px, hiY));
+    for (let i = seg.length - 1; i >= 0; i--) ctx.lineTo(seg[i][0], seg[i][2]);
+    ctx.closePath();
+    ctx.fillStyle = bandColour;
+    ctx.fill();
+    ctx.beginPath();
+    seg.forEach(([px, , , p50], i) => i ? ctx.lineTo(px, p50) : ctx.moveTo(px, p50));
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    seg.length = 0;
+  };
+  for (let i = 0; i < times.length; i++) {
+    if (Number.isFinite(series.p50[i])) {
+      seg.push([xs.x(times[i]), y(series.hi[i]), y(series.lo[i]), y(series.p50[i])]);
+    } else flush();
+  }
+  flush();
 }
 
 function drawTempChart() {
@@ -643,30 +734,7 @@ function drawTempChart() {
     ctx.fillText(Math.round(v * 10) / 10 + tempUnit.replace("°C", "°"), PAD.l - 6, y(v) + 4);
   }
 
-  // CI band (temperature is instantaneous at the tick — points sit at the timestamps)
-  const seg = [];
-  const flush = () => {
-    if (seg.length < 2) { seg.length = 0; return; }
-    ctx.beginPath();
-    seg.forEach(([px, hiY], i) => i ? ctx.lineTo(px, hiY) : ctx.moveTo(px, hiY));
-    for (let i = seg.length - 1; i >= 0; i--) ctx.lineTo(seg[i][0], seg[i][2]);
-    ctx.closePath();
-    ctx.fillStyle = cssVar("--temp-band");
-    ctx.fill();
-    // median
-    ctx.beginPath();
-    seg.forEach(([px, , , p50], i) => i ? ctx.lineTo(px, p50) : ctx.moveTo(px, p50));
-    ctx.strokeStyle = cssVar("--temp");
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    seg.length = 0;
-  };
-  for (let i = 0; i < times.length; i++) {
-    if (Number.isFinite(temp.p50[i])) {
-      seg.push([xs.x(times[i]), y(temp.hi[i]), y(temp.lo[i]), y(temp.p50[i])]);
-    } else flush();
-  }
-  flush();
+  drawBandAndMedian(ctx, xs, times, temp, y, cssVar("--temp"), cssVar("--temp-band"));
 
   drawNowLine(ctx, xs, hgt);
   drawHover(ctx, xs, w, hgt, "temp", y);
@@ -747,40 +815,133 @@ function drawPrecipChart() {
   ctx.stroke();
 
   drawNowLine(ctx, xs, hgt);
-  drawHover(ctx, xs, w, hgt, "prec", y, yp);
+  drawHover(ctx, xs, w, hgt, "prec", y);
+}
+
+// Height of the strip above the wind plot that carries the direction arrows.
+const WIND_STRIP = 22;
+
+function drawWindChart() {
+  const { times, tz, wind, windUnit } = state.data;
+  const canvas = $("wind-chart");
+  const { ctx, w, hgt } = setupCanvas(canvas);
+  const xs = makeXScale(times, w);
+  const top = PAD.t + WIND_STRIP;
+
+  // Axis from zero; floored so a calm week isn't stretched into drama.
+  const finite = wind.hi.filter(Number.isFinite);
+  const y0 = 0, y1 = Math.max(windUnit === "km/h" ? 30 : 8, ...finite) * 1.1;
+  const y = (v) => hgt - PAD.b - ((v - y0) / (y1 - y0)) * (hgt - top - PAD.b);
+
+  drawTimeAxis(ctx, xs, w, hgt, tz, top);
+
+  ctx.font = "11px Inter, system-ui, sans-serif";
+  const step = niceStep(y1 - y0, 5);
+  for (let v = 0; v <= y1; v += step) {
+    ctx.strokeStyle = cssVar("--grid");
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(PAD.l, y(v));
+    ctx.lineTo(w - PAD.r, y(v));
+    ctx.stroke();
+    ctx.fillStyle = cssVar("--muted");
+    ctx.textAlign = "right";
+    ctx.fillText(String(Math.round(v)), PAD.l - 6, y(v) + 4);
+  }
+
+  // Reference lines where the scale reaches them: Beaufort 8 (gale, also the
+  // tropical-storm threshold) and Beaufort 12 (hurricane force). Both are
+  // defined for 10 m sustained wind, which is what this series is.
+  if (windUnit === "km/h") {
+    ctx.save();
+    ctx.setLineDash([5, 4]);
+    ctx.textAlign = "right";
+    ctx.font = "10px Inter, system-ui, sans-serif";
+    for (const [v, label] of [[62, "gale (Bft 8)"], [118, "hurricane force (Bft 12)"]]) {
+      if (v > y1 - step * 0.3) continue;
+      ctx.strokeStyle = cssVar("--muted");
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(PAD.l, y(v));
+      ctx.lineTo(w - PAD.r, y(v));
+      ctx.stroke();
+      ctx.fillStyle = cssVar("--muted");
+      ctx.fillText(label, w - PAD.r - 4, y(v) - 4);
+    }
+    ctx.restore();
+  }
+
+  drawBandAndMedian(ctx, xs, times, wind, y, cssVar("--wind"), cssVar("--wind-band"));
+
+  // Direction arrows, one per timestamp (thinned like the hour labels so they
+  // line up with them). They point *downwind*, the way streamlines do on a
+  // weather map; the tooltip spells out where the wind comes from.
+  const H6 = 6 * 3600;
+  const pxPer6h = xs.x(xs.t0 + H6) - xs.x(xs.t0);
+  const every = [1, 2, 4].find((e) => e * pxPer6h >= 16);
+  if (every) {
+    const cy = PAD.t + WIND_STRIP / 2, len = 11, head = 3.5;
+    ctx.strokeStyle = cssVar("--ink");
+    ctx.lineWidth = 1.2;
+    ctx.lineCap = "round";
+    for (let i = 0; i < times.length; i++) {
+      if (!Number.isFinite(wind.dir[i]) || Math.round(times[i] / H6) % every) continue;
+      const r = wind.dir[i] * Math.PI / 180;
+      // Screen y grows downwards, so "towards" = (-sin θ, +cos θ).
+      const dx = -Math.sin(r), dy = Math.cos(r);
+      const cx = xs.x(times[i]);
+      const x0 = cx - dx * len / 2, y0a = cy - dy * len / 2;
+      const x1 = cx + dx * len / 2, y1a = cy + dy * len / 2;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0a);
+      ctx.lineTo(x1, y1a);
+      ctx.moveTo(x1 - dx * head - dy * head, y1a - dy * head + dx * head);
+      ctx.lineTo(x1, y1a);
+      ctx.lineTo(x1 - dx * head + dy * head, y1a - dy * head - dx * head);
+      ctx.stroke();
+    }
+  }
+
+  drawNowLine(ctx, xs, hgt, top);
+  drawHover(ctx, xs, w, hgt, "wind", y, top);
 }
 
 /* ---------------- hover readout ---------------- */
-function drawHover(ctx, xs, w, hgt, which, y, yp) {
+function drawHover(ctx, xs, w, hgt, which, y, top = PAD.t) {
   if (state.hover == null || !state.data) return;
-  const { times, tz, temp, prec, tempUnit, precUnit } = state.data;
+  const { times, tz, temp, prec, wind, tempUnit, precUnit, windUnit } = state.data;
   const i = state.hover;
   if (i < 0 || i >= times.length) return;
   const t = times[i];
   const p = localParts(t, tz);
 
   const lines = [];
-  const hh = (x) => String(x).padStart(2, "0");
-  const hm = (q) => `${hh(q.h)}:${hh(q.min)}`; // minutes matter in half-hour zones
   if (which === "temp") {
     if (!Number.isFinite(temp.p50[i])) return;
-    lines.push(`${DAYS[p.day]} ${hm(p)}`);
+    lines.push(`${DAYS[p.day]} ${hhmm(p)}`);
     lines.push(`median ${temp.p50[i].toFixed(1)} ${tempUnit}`);
     lines.push(`${CI_LABEL}: ${temp.lo[i].toFixed(1)} … ${temp.hi[i].toFixed(1)}`);
+  } else if (which === "wind") {
+    if (!Number.isFinite(wind.p50[i])) return;
+    lines.push(`${DAYS[p.day]} ${hhmm(p)}`);
+    lines.push(`median ${Math.round(wind.p50[i])} ${windUnit}`);
+    lines.push(`${CI_LABEL}: ${Math.round(wind.lo[i])} … ${Math.round(wind.hi[i])}`);
+    if (Number.isFinite(wind.dir[i])) {
+      lines.push(`from ${compass(wind.dir[i])} (${Math.round(wind.dir[i])}°)`);
+    }
   } else {
     if (!Number.isFinite(prec.p50[i])) return;
-    const pFrom = localParts(t - 6 * 3600, tz);
-    lines.push(`${DAYS[p.day]} ${hm(pFrom)}–${hm(p)}`);
+    lines.push(rangeLabel(t - 6 * 3600, t, tz));
     lines.push(`median ${prec.p50[i].toFixed(1)} ${precUnit}, P${Math.round(CI_HI*100)}: ${prec.hi[i].toFixed(1)}`);
     lines.push(`P(rain) ${(prec.prob[i] * 100).toFixed(0)} %`);
   }
 
-  const px = which === "temp" ? xs.x(t) : (xs.x(t) + xs.x(t - 6 * 3600)) / 2;
+  const px = which === "prec" ? (xs.x(t) + xs.x(t - 6 * 3600)) / 2 : xs.x(t);
   ctx.save();
   ctx.strokeStyle = "rgba(34,48,58,0.4)";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(px, PAD.t);
+  ctx.moveTo(px, top);
   ctx.lineTo(px, hgt - PAD.b);
   ctx.stroke();
 
@@ -790,7 +951,7 @@ function drawHover(ctx, xs, w, hgt, which, y, yp) {
   let bx = px + 8;
   if (bx + wBox > w - PAD.r) bx = px - 8 - wBox;
   bx = Math.max(2, Math.min(bx, w - wBox - 2)); // keep the box on the canvas
-  const by = PAD.t + 4;
+  const by = top + 4;
   ctx.fillStyle = "rgba(255,255,255,0.94)";
   ctx.strokeStyle = cssVar("--grid");
   ctx.beginPath();
@@ -803,18 +964,22 @@ function drawHover(ctx, xs, w, hgt, which, y, yp) {
   ctx.restore();
 }
 
-function attachHover(canvas) {
+// `interval` charts (precipitation) show the 6-h interval ending at each
+// timestamp, so the cursor picks the interval it is *in*; instantaneous ones
+// (temperature, wind) pick the nearest timestamp. The index is shared, so the
+// other charts follow along at the same instant.
+function attachHover(canvas, interval = false) {
+  const anchor = interval ? 3 * 3600 : 0; // interval centre, or the tick itself
   const move = (ev) => {
     if (!state.data) return;
     const rect = canvas.getBoundingClientRect();
     const px = (ev.touches ? ev.touches[0].clientX : ev.clientX) - rect.left;
     const xs = makeXScale(state.data.times, rect.width);
     const t = xs.invert(px);
-    // nearest timestamp (temperature) / containing interval (precip): use nearest index
     const times = state.data.times;
     let best = 0, bestD = Infinity;
     for (let i = 0; i < times.length; i++) {
-      const d = Math.abs(times[i] - 3 * 3600 - t); // centre of interval as anchor
+      const d = Math.abs(times[i] - anchor - t);
       if (d < bestD) { bestD = d; best = i; }
     }
     state.hover = best;
@@ -829,6 +994,7 @@ function drawAll() {
   if (!state.data) return;
   drawTempChart();
   drawPrecipChart();
+  if (state.data.wind) drawWindChart();
 }
 
 function renderDailyTable() {
@@ -1135,7 +1301,8 @@ if ("serviceWorker" in navigator) {
 }
 document.querySelectorAll(".ci-label").forEach((el) => { el.textContent = CI_LABEL; });
 attachHover($("temp-chart"));
-attachHover($("precip-chart"));
+attachHover($("precip-chart"), true);
+attachHover($("wind-chart"));
 window.addEventListener("resize", drawAll);
 // redraw once the self-hosted font is ready so canvas text uses it
 if (document.fonts?.ready) document.fonts.ready.then(drawAll);
